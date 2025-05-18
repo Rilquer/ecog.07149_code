@@ -12,6 +12,12 @@ To cite this code:
 
 Zenodo citation
 
+Rilquer Mascarenhas, Ana C. Carnaval. Investigating the relative role of dispersal and demographic traits in predictive phylogeography
+
+https://github.com/connor-french/global-insect-macrogenetics/. 10.5281/zenodo.8125548. 2023.
+
+10.5281/zenodo.12209533
+
 Open access in Ecography:
 
 
