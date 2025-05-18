@@ -1,0 +1,349 @@
+---
+title: "3. Creating predictor variables"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+> #### Summary
+>
+> -   
+>
+> ##### Data required
+>
+> ##### Data generated
+>
+> ##### Package sutilized
+>
+> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+
+------------------------------------------------------------------------
+
+### 5.1 Geographic, topographic and environmental pairwise distances
+
+To calculate all pairwise distances to be used as predictors (i.e., geographic, topographic and environmental), we will create friction surfaces for each predictor.
+
+For topographic and environmental distance, we will use rasters for elevation and all 19 bioclimatic variables, respectively.
+
+We have already created previously a transition matrix for `georaster`. We will now create the transition matrix for topography and all bioclimatic variables.
+
+Transform elevation raster values to positive:
+
+```{r}
+elevation <- elevation+29
+```
+
+Reading stack of climatic values:
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+clim <- stack(list.files('data/spatial/raster/climdata/01_cur_chelsa_V1_2B_r2_5m/',
+                         pattern = '.tif$',
+                         full.names = T))
+clim <- crop(raster::mask(clim,as_Spatial(buf)),extent(study_area))
+```
+
+Creating transition matrix:
+
+```{r}
+tr_elevation <- elevation %>%
+  gdistance::transition(mean, directions = 8) %>% 
+  gdistance::geoCorrection("c")
+
+tr_clim <- lapply(as.list(clim), gdistance::transition,mean, directions = 8)
+tr_clim <- lapply(tr_clim, gdistance::geoCorrection,"c")
+
+#For SDMs, in the future
+# Use a function where the distance between two cells will be the result of their difference:
+# f(i,j) = i - j
+# If i > j, that means j has lower suitability so prob of moving to j is lower
+# The result here is positive.
+# If i < j, that means j has higher suitability so prob of moving to j is higher.
+# The result here is negative.
+# Invert the results (multiply by -1), because I want i > j to be negative values (representing lower prob/distance), and i < j to be positive values (representing higher prob/distance). This will also be proportional to the original result:
+# Example:
+# if i - j = -20, j is 20 more than i, so transform to positive, prob = 20
+# if i - j = 50, j is 50 less than i, so transform to negative, prob = -50
+# Then I look for the lowest negative value (neg) and sum neg+1 to all values, to remove all
+# negative values. In our exemple, if neg = -50, -50 would become 1 and 20 would become 71 (it keeps the relative differences in probability).
+
+#tr_current_lcp <- pred %>%
+#  gdistance::transition(function, directions = 8) %>%  #create a transition matrix
+#  gdistance::geoCorrection("c") #correct for geographic distortion
+```
+
+Calculate friction surface for each species:
+
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
+pred_lcp <- c()
+for (i in 1:length(aln_loc)) {
+# Skipping Pseudopipra pipra
+  if (i != 19) {
+    lcp_geo <-
+      costDistance(tr_geo, coordinates(aln_loc[[i]][,4:5])) %>% 
+      as.vector()
+
+    lcp_elevation <-
+      costDistance(tr_elevation, coordinates(aln_loc[[i]][,4:5])) %>% 
+      as.vector()
+
+    lcp_clim <- lapply(tr_clim, costDistance, coordinates(aln_loc[[i]][,4:5]))
+    lcp_clim <- as.data.frame(lapply(lcp_clim, as.vector))
+    colnames(lcp_clim) <- paste0('lcp_',names(clim))
+
+    add <- data.frame(lcp_geo,lcp_elevation,lcp_clim)
+    pred_lcp <- rbind(pred_lcp,add)
+  }
+}
+```
+
+At the end, `pred_lcp` should have the same nrow of `rf_data`, so we merge both:
+
+```{r modify_rfdata}
+rf_data <- data.frame(rf_data,pred_lcp)
+```
+
+> I can have midpoints for different predictor variables. Should I think of creating a transition matrix with the median of environmental distances across all bioclim variables? That way I could have one main picture of the paper for visualization of midpoints: D~XY~ in geo distance, D~XY~ in topographic distance and D~XY~ in environmental distance. For the locus, I could normalize variance across locus to be able to plot them in one picture.
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### 5.2 Ecological traits
+
+Modifying spelling of *Platyrinchus*.
+
+```{r modify_rfdata}
+rf_data$otu[which(rf_data$otu=='Platyrhinchus mystaceus')] <- 'Platyrinchus mystaceus'
+```
+
+Read dispersal traits data.
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+trait_data <- read_csv('data/trait_data/spp_trait_data.csv')
+avonet_birdlife <- read_csv('data/trait_data/avonet_birdlife.csv') %>%
+  dplyr::select(Species1,Tarsus.Length,Wing.Length)
+avonet_ebird <- read_csv('data/trait_data/avonet_ebird.csv') %>%
+  dplyr::select(Species2,Tarsus.Length,Wing.Length)
+avonet_birdtree <- read_csv('data/trait_data/avonet_birdtree.csv')%>%
+  dplyr::select(Species3,Tarsus.Length,Wing.Length)
+
+trait_data <- trait_data %>% left_join(avonet_birdlife, by = c("species" = "Species1")) %>%
+  left_join(avonet_ebird,by = c("species" = "Species2")) %>% 
+  left_join(avonet_birdtree,by = c("species" = "Species3")) %>% 
+  dplyr::slice(-27) %>% 
+  rowwise() %>% mutate(tarsus_length = mean(Tarsus.Length.x, Tarsus.Length.y,
+                                            Tarsus.Length, na.rm = TRUE),
+                       wing_length = mean(Wing.Length.x,Wing.Length.y,
+                                          Wing.Length,na.rm=TRUE)) %>%
+  dplyr::select(c(species,body_size_hbw,for_str_hbw_n,diet_hbw_n,sensit_stotz,
+                  tarsus_length,wing_length)) %>% 
+  ungroup()
+
+# Manually adding values that didn't work
+# Caryothraustes brasiliensis
+trait_data$tarsus_length[trait_data$species == 'Caryothraustes brasiliensis'] <- 20.5
+trait_data$wing_length[trait_data$species == 'Caryothraustes brasiliensis'] <- 90.8
+trait_data$tarsus_length[trait_data$species == 'Microspingus'] <- 21.7
+trait_data$wing_length[trait_data$species == 'Microspingus'] <- 67.1
+trait_data$tarsus_length[trait_data$species == 'Myrmeciza squamosa'] <- 27.2
+trait_data$wing_length[trait_data$species == 'Myrmeciza squamosa'] <- 60
+trait_data$tarsus_length[trait_data$species == 'Myrmeciza loricata'] <- 25.3
+trait_data$wing_length[trait_data$species == 'Myrmeciza loricata'] <- 59.8
+```
+
+Reading and adding life history data:
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+bird_2020 <- read_csv('data/trait_data/life_history_bird2020.csv')
+
+trait_data <- trait_data %>% left_join(bird_2020, by = 'species')
+
+trait_data$survival[trait_data$species == 'Caryothraustes brasiliensis'] <- 0.67
+trait_data$age_first[trait_data$species == 'Caryothraustes brasiliensis'] <- 1.33
+trait_data$longevity[trait_data$species == 'Caryothraustes brasiliensis'] <- 10.2
+trait_data$gen_length[trait_data$species == 'Caryothraustes brasiliensis'] <- 3.19544486
+
+trait_data$survival[trait_data$species == 'Microspingus'] <- 0.63
+trait_data$age_first[trait_data$species == 'Microspingus'] <- 1.07
+trait_data$longevity[trait_data$species == 'Microspingus'] <- 8.81
+trait_data$gen_length[trait_data$species == 'Microspingus'] <- 2.65159807
+
+trait_data$survival[trait_data$species == 'Myrmeciza squamosa'] <- 0.63
+trait_data$age_first[trait_data$species == 'Myrmeciza squamosa'] <- 1.09
+trait_data$longevity[trait_data$species == 'Myrmeciza squamosa'] <- 8.2
+trait_data$gen_length[trait_data$species == 'Myrmeciza squamosa'] <- 2.591936941
+
+trait_data$survival[trait_data$species == 'Myrmeciza loricata'] <- 0.7
+trait_data$age_first[trait_data$species == 'Myrmeciza loricata'] <-	1.36
+trait_data$longevity[trait_data$species == 'Myrmeciza loricata'] <-	9.42
+trait_data$gen_length[trait_data$species == 'Myrmeciza loricata'] <- 3.328191873
+```
+
+Adding to `rf_data`:
+
+```{r modify_rfdata}
+rf_data <- rf_data %>% left_join(trait_data, by = c("otu" = "species")) %>% as_tibble()
+```
+
+### 5.3 Correlation matrix
+
+Correlation matrix of predictor variables:
+
+```{r}
+pred_var <- rf_data %>% dplyr::select(-c(otu,locus,alignment,pop1,pop2,long1,lat1,
+                                         long2,lat2,mid_long,mid_lat,dxy))
+cor_matrix <- correlate(pred_var, method = 'spearman') %>% 
+  stretch(remove.dups = FALSE) %>% filter(r > 0.85)
+
+cor_matrix %>% filter(x == "lcp_bio_4") # Temperature seasonality
+# Correlated to geo, elev, mean temp, mean warmest, mean coldest, annual precip,
+# precip wettest month/quarter, precip driest month/quarter
+
+cor_matrix %>% filter(x == "lcp_bio_19") # precip coldest
+# precip of driest month/quarter, temperature seasonality
+
+cor_matrix %>% filter(x == "survival") # 0.87 with body size
+cor_matrix %>% filter(x == "longevity") # Not highly correlated with anything
+cor_matrix %>% filter(x == "generation_length") # Not highly correlated with anything
+cor_matrix %>% filter(x == "tarsus_length") # Not highly correlated with anything
+cor_matrix %>% filter(x == "body_size_hbw") # 0.87 with wing length and survival
+cor_matrix %>% filter(x == "wing_length") # 0.87 with body size
+```
+
+Plotting correlations:
+
+```{r}
+ggplot(trait_data,aes(x=body_size_hbw,y=wing_length))+geom_point()+
+  geom_smooth(method = 'lm')
+```
+
+```{r}
+ggplot(trait_data,aes(x=body_size_hbw,y=survival))+geom_point()+
+  geom_smooth(method = 'lm')
+```
+
+### 5.4 Response over predictors
+
+```{r}
+#Data frame with var and plotting name
+predictors <- data.frame(var = c("lcp_elevation","lcp_geo","locus",
+                               "lcp_bio_1","lcp_bio_2","lcp_bio_3",
+                               "lcp_bio_4","lcp_bio_5","lcp_bio_6","lcp_bio_7",
+                               "lcp_bio_8","lcp_bio_9","lcp_bio_10","lcp_bio_11",
+                               "lcp_bio_12","lcp_bio_13","lcp_bio_14","lcp_bio_15",
+                               "lcp_bio_16","lcp_bio_17","lcp_bio_18","lcp_bio_19",
+                               "age_first","body_size_hbw","diet_hbw_n","for_str_hbw_n",
+                               "gen_length","longevity","sensit_stotz",
+                               "survival","tarsus_length","wing_length"),
+                       names = c("Elev. resistance","Geo. distance","Locus",
+                               "Bio 1","Bio 2","Bio 3",
+                               "Bio 4","Bio 5","Bio 6","Bio 7",
+                               "Bio 8","Bio 9","Bio 10","Bio 11",
+                               "Bio 12","Bio 13","Bio 14","Bio 15",
+                               "Bio 16","Bio 17","Bio 18","Bio 19",
+                               "Age at first rep.","Body size","Diet","Foraging stratum",
+                               "Generationlength","Longevity","Sensitivity",
+                               "Survival","Tarsus length","Wing length"))
+#Creating labeller for facet wrap
+lbl <- predictors$names
+names(lbl) <- predictors$var
+dxy_pred_plot <- rf_data %>% select(-c(otu,locus,alignment,pop1,pop2,
+                                       long1,lat1,long2,lat2,
+                                       mid_long,mid_lat)) %>% 
+  pivot_longer(!(dxy),names_to = 'Predictor',values_to = 'Values')
+dxy_pred_plot$Predictor <- fct_relevel(dxy_pred_plot$Predictor,
+                                       predictors$var)
+ggplot(data=dxy_pred_plot,aes(x=Values,y=dxy))+geom_point(alpha=0.3)+
+  facet_wrap(~Predictor, scales = 'free',
+             labeller = labeller(Predictor = lbl))+
+  labs(x = bquote(D[XY]),y='Values of predictors')
+ggsave('output/figures/dxy_over_pred.png',width = 12,height = 6)
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### 5.5 Visualizing extent of extrapolation per species
+
+```{r}
+spp <- sort(unique(rf_data$otu))
+outpath <- 'output/figures/extrapolation_per_spp/'
+extrap_plot <- function(species,data,outpath) {
+  pred_data <- data %>% select(otu,predictors$var) %>% select(-locus) %>% 
+    mutate(set = ifelse(otu!=species,'Training','Test'))
+  
+  ### Predictors with varying values per species
+  plotdata <- pred_data %>% select(c(otu,set,starts_with('lcp'))) %>% 
+    pivot_longer(!(c(otu,set)),names_to = 'Predictor',values_to = 'Values') %>%
+    mutate(Predictor = factor(Predictor,
+                              levels=c("lcp_elevation","lcp_geo","locus",
+                                 "lcp_bio_1","lcp_bio_2","lcp_bio_3",
+                                 "lcp_bio_4","lcp_bio_5","lcp_bio_6","lcp_bio_7",
+                                 "lcp_bio_8","lcp_bio_9","lcp_bio_10","lcp_bio_11",
+                                 "lcp_bio_12","lcp_bio_13","lcp_bio_14","lcp_bio_15",
+                                 "lcp_bio_16","lcp_bio_17","lcp_bio_18","lcp_bio_19")))
+    
+  # Getting min and max values of test dataset
+  minmax <- plotdata %>% filter(set == 'Test') %>% group_by(Predictor) %>%
+    summarize(min_test=min(Values),max_test=max(Values)) %>% ungroup()
+  
+  # Plotting density
+  ggplot(plotdata,aes(x=Values,fill=set,colot=set))+
+    geom_density(alpha=0.2)+
+    facet_wrap(~Predictor, scales = 'free',
+               labeller = labeller(Predictor = lbl))+
+    labs(x = 'Predictor values')
+  ggsave(paste0(outpath,'/',gsub(' ','_',species),'_environment_density.png'),
+         width = 12, height = 6)
+  
+  # Plotting histogram with dashed lines
+  plotdata <- plotdata %>% filter(set == 'Training')
+  ggplot(plotdata,aes(x=Values))+
+    geom_histogram(fill='blue',alpha=0.2)+
+    facet_wrap(~Predictor, scales = 'free',
+               labeller = labeller(Predictor = lbl))+
+    geom_vline(aes(xintercept = min_test),minmax,linetype = 'dashed',color='red')+
+    geom_vline(aes(xintercept = max_test),minmax,linetype = 'dashed',color='red')+
+    labs(x = 'Predictor values')
+  ggsave(paste0(outpath,'/',gsub(' ','_',species),'_environment_dashed.png'),
+         width = 12, height = 6)
+  
+  # Predictors with one value per species
+  plotdata <- pred_data %>% select(c(otu,set,!(starts_with('lcp')))) %>% 
+    pivot_longer(!(c(otu,set)),names_to = 'Predictor',values_to = 'Values') %>% 
+    mutate(Predictor = factor(Predictor,
+                              levels=c("age_first","body_size_hbw","diet_hbw_n",
+                                       "for_str_hbw_n",
+                                       "gen_length","longevity","sensit_stotz",
+                                       "survival","tarsus_length","wing_length")))
+  # Getting min and max values of test dataset
+  sppvalue <- plotdata %>% filter(set == 'Test') %>% group_by(Predictor) %>% 
+    summarize(val = unique(Values)) %>% ungroup()
+  plotdata <- plotdata %>% filter(set == 'Training')
+  
+  ggplot(plotdata,aes(y=Values))+geom_boxplot(fill='blue',alpha=0.2)+
+    facet_wrap(~Predictor, scales = 'free',
+               labeller = labeller(Predictor = lbl))+
+    geom_hline(aes(yintercept = val),sppvalue,linetype = 'dashed',color='red')+
+    labs(y = 'Predictor values')
+  ggsave(paste0(outpath,'/',gsub(' ','_',species),'_traits.png'),
+         width = 12, height = 6)
+}
+lapply(spp,extrap_plot,data = rf_data,outpath = outpath)
+```
+
+### 5.6 Principal Component of environment to plot climatic spaces
+
+```{r modify_rf_data}
+rf_data <- rf_data %>% mutate(region = ifelse(mid_lat < -19,'saf','naf'))
+env <- rf_data %>% select(starts_with('lcp_bio'))
+pca <- prcomp(env)
+rf_data <- rf_data %>% mutate(env_pc1 = pca$x[,1],env_pc2 = pca$x[,2])
+
+ggplot(rf_data,aes(x=env_pc1,y=env_pc2,color=region))+geom_point(alpha=0.5)
+```

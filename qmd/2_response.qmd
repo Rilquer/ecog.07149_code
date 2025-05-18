@@ -1,0 +1,264 @@
+---
+title: "3. Creating response variable"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+> #### Summary
+>
+> -   
+>
+> ##### Data required
+>
+> ##### Data generated
+>
+> ##### Packages utilized
+>
+> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+
+------------------------------------------------------------------------
+
+### 3.1 Aligning and calculating pairwise D~XY~
+
+Align each locus for each species.
+
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
+dir.create('data/muscle_aln/')
+aln <- vector('list',length(aln_info))
+pgen <- vector('list',length(aln_info))
+for (i in 1:length(aln_info)) {
+  aln[[i]] <- muscle(DNAStringSet(aln_info[[i]]$fasta,use.names = TRUE))
+  rownames(aln[[i]]) <- aln_info[[i]]$accession
+  dir.create(paste0('data/muscle_aln/',file[i]))
+  alignment2Fasta(aln[[i]],paste0('data/muscle_aln/',file[i],'/',file[i],'_aln.fasta'))
+}
+```
+
+Calculating D~XY~ from alignment using `PopGenome`::
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+for (i in 1:length(aln_info)) {
+# Skipping Pseudopipra pipra because of an error when trying to run PopGenome
+  if (i != 19) {
+    pops_list <- aln_info[[i]] %>% 
+      dplyr::select(pops, accession) %>% 
+      group_split(pops) %>% 
+      map(pull, accession)
+    
+    pgen[[i]] <- readData(paste0('data/muscle_aln/',file[i],'/'),
+                          populations = pops_list) %>% 
+      diversity.stats.between()
+  }
+}
+```
+
+Creating `rf_data` object, adding OTU name, locus and D~XY~ values. We also get coordinates and locality info for each pair of locality, and add it to `rf_data`:
+
+```{r modify_rfdata}
+rf_data <- c()
+for (i in 1:length(pgen)) {
+  # Checking and skipping NULL slot for Pseudopipra pipra
+  if (!(is.null(pgen[[i]]))) {
+    dxy <- as.vector(pgen[[i]]@nuc.diversity.between)
+    otu <- rep(unique(aln_info[[i]]$otu),length(dxy))
+    locus <- rep(unique(aln_info[[i]]$locus),length(dxy))
+    alignment <- rep(paste0(unique(aln_info[[i]]$otu),' - ',unique(aln_info[[i]]$locus)),
+                     length(dxy))
+    loc_ind <- t(combn(1:nrow(aln_loc[[i]]),2))
+    colnames(loc_ind) <- c('pop1','pop2')
+    long1 <- c()
+    lat1 <- c()
+    long2 <- c()
+    lat2 <- c()
+    for (j in 1:nrow(loc_ind)) {
+      long1 <- c(long1,aln_loc[[i]]$longitude[loc_ind[j,1]])
+      lat1 <- c(lat1,aln_loc[[i]]$latitude[loc_ind[j,1]])
+      long2 <- c(long2,aln_loc[[i]]$longitude[loc_ind[j,2]])
+      lat2 <- c(lat2,aln_loc[[i]]$latitude[loc_ind[j,2]])
+    }
+    rf_data <- rbind(rf_data,data.frame(otu,locus,alignment,loc_ind,long1,lat1,long2,lat2,dxy))
+  }
+}
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### 3.2 Visualizing raw D~XY~ values
+
+Visualizing range D~XY~ values - Figure S1:
+
+```{r}
+ggplot(data = rf_data,aes(x = otu,y=dxy,fill=locus))+geom_boxplot()+
+  theme(axis.text.x = element_text(angle = 70, hjust = 1))+
+  scale_fill_discrete(labels = c('Control Region','CytB','ND2'))+
+  labs(x = 'Species',y=bquote(D[XY]),fill='Locus')
+ggsave('data/response_variable/figures/dxy_values/range_dxy_per_spp.png',
+       width = 12, height = 6, dpi = 1200)
+```
+
+We will retrieve the geographic coordinates of the midpoint between the localities by using a friction surface based on a raster where all cells have equal values. This basically means we are just looking for the shortest path between two localities. To make that raster, we will just use an elevation raster as template and modify the values. We will also restrict all calculations geographically by masking our raster with a buffer polygon based on the localities.
+
+Create buffered polygon:
+
+```{r}
+buf <- rgeos::gBuffer(SpatialPoints(data.frame(unique_localities$longitude,
+                                        unique_localities$latitude)),
+               width = 3)
+buf <- sf::st_as_sf(buf)
+st_crs(buf) <- study_crs
+buf <- st_transform(buf)
+ggplot()+geom_sf(data = buf)+
+  geom_point(data = unique_localities, aes(x = longitude,
+                                           y = latitude), size = 1, color = 'black')
+```
+
+Get elevation raster:
+
+```{r}
+elevation <- raster('data/spatial/raster/wc2.1_2.5m_elev/wc2.1_2.5m_elev.tif')
+```
+
+> Note we are using 2.5m resolution, different from the one we used to create the Serra do Mar shapefile. For Serra do Mar, we wanted high resolution for a nicer shapefile. For spatial analyses, we will default to 2.5 min resolution.
+
+Mask elevation raster:
+
+```{r}
+elevation <- crop(raster::mask(elevation,as_Spatial(buf)),extent(study_area))
+```
+
+Create geographic distance raster
+
+```{r}
+georaster <- elevation
+raster::values(georaster)[(!(is.na(raster::values(georaster))))] <- 1
+```
+
+We make a transition matrix to calculate shortest path:
+
+```{r}
+tr_geo <- georaster %>%
+  gdistance::transition(mean, directions = 8) %>% #create a transition matrix
+  gdistance::geoCorrection("c") #correct for geographic distortion
+```
+
+We use function `shortestPath` from the `gdistance` package to get a midpoint per row in `rf_data`.
+
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
+midpoint <- c()
+for (i in 1:nrow(rf_data)) {
+  coords <- rf_data %>% dplyr::slice(i) %>% dplyr::select(long1,lat1,long2,lat2)
+  line <- gdistance::shortestPath(tr_geo,
+                                  SpatialPoints(coords[1,1:2]),
+                                  SpatialPoints(coords[1,3:4]),
+                                  output='SpatialLines')
+
+  # This code should repeat for all alignments, so it matches rf_data
+  line <- as.matrix(line@lines[[1]]@Lines[[1]]@coords)
+  midrow <- as.integer(nrow(line)/2)
+  midpoint <- rbind(midpoint,data.frame(mid_long = as.numeric(line[midrow,1]),
+                                        mid_lat = as.numeric(line[midrow,2])))
+}
+```
+
+Adding to `rf_data`:
+
+```{r modify_rfdata}
+rf_data <- as_tibble(data.frame(rf_data,midpoint))
+```
+
+Plotting all mid points, for checking:
+
+```{r}
+ggplot()+geom_sf(data = buf)+
+  geom_point(data=rf_data,aes(x=mid_long,y=mid_lat))
+```
+
+Plotting all D~XY~ values of all OTUs in one map:
+
+```{r}
+ggplot()+geom_sf(data = buf) + geom_point(data = arrange(rf_data,dxy),
+                                          aes(x = mid_long,
+                                              y = mid_lat,
+                                              color = dxy),
+                                          alpha = 0.5)+
+  scale_color_viridis()
+ggsave('output/maps/map_all_dxy.tiff', width = 7, height = 9)
+```
+
+Plotting D~XY~ values per species:
+
+```{r}
+dir.create('output/maps/raw_dxy_per_spp/')
+# Separately
+for (i in 1:length(aln_info)) {
+  if (i != 19) {
+    sp <- rep(unique(aln_info[[i]]$otu,length(dxy)))
+    lc <- rep(unique(aln_info[[i]]$locus,length(dxy)))
+    plotdata <- rf_data %>% filter(otu == sp & locus == lc)
+    ggplot()+geom_sf(data = buf) +
+      geom_point(data = aln_loc[[i]],aes(x = longitude,
+                                         y = latitude),
+                 color = 'black',alpha=0.2)+
+      geom_point(data = arrange(plotdata,dxy),aes(x = mid_long,
+                                                  y = mid_lat,
+                                                  color = dxy),
+                                              alpha = 0.8)+
+      scale_color_viridis()+
+      ggtitle(bquote(paste(italic(.(sp)),' - ',.(lc),sep='')))
+  ggsave(paste0('output/maps/raw_dxy_per_spp/',sp,'_',lc,'.tiff'), width = 7, height = 9)
+  }
+}
+
+# Facet wrap
+plotdata <- rf_data %>% mutate(aln = paste0(otu,' - ',locus))
+ggplot()+geom_sf(data = buf) +
+      geom_point(data = plotdata,aes(x = mid_long,
+                                     y = mid_lat,
+                                     color = dxy),
+                 alpha = 0.8)+
+      scale_color_viridis(bquote(D[XY]))+
+  facet_wrap(~aln, ncol = 9)+
+  xlab('Latitude')+ylab('Longitude')
+ggsave('output/figures/raw_dxy_per_spp.tiff', width = 20, height = 15)
+```
+
+> Some patterns from the visualization of raw D~XY~ per species:
+>
+> -   The overall map we see is largely dominated by species with large sample size, dense sampling and high levels of structure. For instance, *D. platyrostris*, *Sclerurus scansor*, *X. fuscus*, *S. ruficapilla,* *S. speluncae*, *P. mystaceus*. *D. platyrostris*, specifically, occurs outside of the AF and may be confusing predictions.
+>
+> -   The accuracy of the midpoint visualization, or whether the midpoint visualization is making sense, depends a lot on the density of the sampling. Additionally, midpoints using other variables (maybe the variables that better explain the gen diff) may look different, and show more sensible locations.
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### 3.X Calculating log values of D~XY~
+
+```{r}
+rf_data_log <- rf_data %>% mutate(dxy_l = log(dxy))
+if (any(is.infinite(rf_data_log$dxy_l))) {
+  min_log <- unique(sort(rf_data_log$dxy_l))[2]
+  rf_data_log$dxy_l[which(is.infinite(rf_data_log$dxy_l))] <- min_log
+}
+```
+
+Visualizing:
+
+```{r}
+ggplot(data = rf_data,aes(x = otu,y=dxy,fill=locus))+geom_boxplot()+
+  theme(axis.text.x = element_text(angle = 70, hjust = 1))+
+  scale_fill_discrete(labels = c('Control Region','CytB','ND2'))+
+  labs(x = 'Species',y=bquote(D[XY]),fill='Locus')
+
+ggplot(data = rf_data_log,aes(x = otu,y=dxy_l,fill=locus))+geom_boxplot()+
+  theme(axis.text.x = element_text(angle = 70, hjust = 1))+
+  scale_fill_discrete(labels = c('Control Region','CytB','ND2'))+
+  labs(x = 'Species',y=bquote(D[XY]),fill='Locus')
+```

@@ -1,0 +1,569 @@
+---
+title: "6. Performing and mapping predictions of genetic divergence"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+> #### Summary
+>
+> -   
+>
+> ##### Data required
+>
+> ##### Data generated
+>
+> ##### Package sutilized
+>
+> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+
+## 7. Performing global and species specific prediction for visualization
+
+### 7.1 Organizing global observed and predicted D~XY~ for visualization
+
+Performing predictions using 100 replicates:
+
+```{r}
+load('/media/6TB/rilquer_RData/predictingGenDiff/global_models.RData')
+pred_f <- function (fit,data) {
+  values <- fit %>% lapply(extract_workflow) %>%
+    lapply(extract_fit_parsnip) %>% lapply(predict,data) %>%
+    lapply(dplyr::select,.pred) %>% lapply(unlist) %>%
+    lapply(as.numeric) %>%
+    lapply(rescale,to = c(min(data$dxy),max(data$dxy))) %>%
+    cbind.data.frame() %>% tibble()
+}
+
+#Re-arranging by locus to allow subsetting for rescaling
+rf_preds <- rf_data %>% arrange(desc(locus))
+
+predictions <- lapply(global_models,pred_f,rf_preds)
+rm(global_models)
+names(predictions) <- paste0('pred_',rec_names)
+for (i in 1:length(predictions)) {
+  colnames(predictions[[i]]) <- paste0('pred',1:100)
+  # Adding locus info for rescaling later
+}
+save('predictions',file='/media/6TB/rilquer_RData/predictingGenDiff/predictions_100rep.RData')
+save.image('predGenDiff.RData')
+```
+
+Calculate mean, SD and difference to observed, based on `rf_preds`. We save this to a different object that we will use for plotting.
+
+> We do this before rescaling across loci because we want the stats to be based on the raw predictions. The rescaling across loci is done later, for plotting, to account for different loci used in different species.
+
+```{r}
+rf_plot <- rf_preds %>% select(dxy,locus,mid_long,mid_lat)
+stats <- vector('list',length(rec_names))
+
+for (i in 1:length(predictions)) {
+  diff <- (predictions[[i]]-rf_preds$dxy) %>% rowwise() %>%
+    summarize(mean = mean(c_across(starts_with('pred')))) %>% 
+    dplyr::select(mean) %>% unlist() %>% as.numeric()
+  stats[[i]] <- predictions[[i]] %>% rowwise() %>%
+    summarize(mean = mean(c_across(starts_with('pred'))),
+              sd = sd(c_across(starts_with('pred')))) %>% 
+    mutate(diff = diff)
+}
+stats <- cbind.data.frame(stats)
+colnames(stats) <- do.call(paste0,
+                    expand.grid(c('mean_','sd_','diff_'),rec_names))
+rf_plot <- tibble(rf_plot,stats)
+save.image('predGenDiff.RData')
+```
+
+Rescale cytb and CR, both observed and predicted values. Observed is rescaled based on observed, while predicted for each replicate is rescaled based on predicted
+
+```{r}
+# Function to rescale all locus based on one
+resc_locus <- function(x,loc,data) {
+  loci <- unique(data$locus)[which(unique(data$locus) != loc)]
+  loc_v <- x[which(data$locus==loc)]
+  min_v <- min(loc_v)
+  max_v <- max(loc_v)
+  oth_v <- c()
+  for (i in loci) {
+    val <- x[which(data$locus==i)]
+    oth_v <- c(oth_v,rescale(val,to = c(min_v,max_v)))
+  }
+  return(c(loc_v,oth_v))
+}
+
+rf_plot <- rf_plot %>%
+  mutate(dxy_resc = resc_locus(dxy,'nd2',rf_plot),
+         mean_env_resc = resc_locus(mean_env_fit,'nd2',rf_plot),
+         sd_env_resc = resc_locus(sd_env_fit,'nd2',rf_plot),
+         diff_env_resc = resc_locus(diff_env_fit,'nd2',rf_plot),
+         mean_disp_resc = resc_locus(mean_env_disp_fit,'nd2',rf_plot),
+         sd_disp_resc = resc_locus(sd_env_disp_fit,'nd2',rf_plot),
+         diff_disp_resc = resc_locus(diff_env_disp_fit,'nd2',rf_plot),
+         mean_lh_resc = resc_locus(mean_env_lh_fit,'nd2',rf_plot),
+         sd_lh_resc = resc_locus(sd_env_lh_fit,'nd2',rf_plot),
+         diff_lh_resc = resc_locus(diff_env_lh_fit,'nd2',rf_plot),
+         mean_all_resc = resc_locus(mean_env_all_fit,'nd2',rf_plot),
+         sd_all_resc = resc_locus(sd_env_all_fit,'nd2',rf_plot),
+         diff_all_resc = resc_locus(diff_env_all_fit,'nd2',rf_plot))
+save.image('predGenDiff.RData')
+```
+
+### 7.2 Plotting observed and predicted D~XY~ values - point and interpolated
+
+#### Plotting raw
+
+Predictors:
+
+```{r}
+plotready <- rf_plot %>%
+  pivot_longer(ends_with('resc'),names_to ='stat_pred',
+               values_to = 'values') %>%
+  dplyr::select(locus,mid_long,mid_lat,stat_pred,values) %>% 
+  mutate(stat = str_split_i(stat_pred,'_',1),
+         predictors = str_split_i(stat_pred,'_',2)) %>%
+  filter(stat != 'dxy') # Filtering out observed
+plotready$predictors <- factor(plotready$predictors,
+                               levels = c('env','disp','lh','all'))
+plotready$stat <- factor(plotready$stat,
+                         levels = c('mean','sd','diff'))
+
+lbl <- c('Env. only',
+         'Env. + dispersal traits',
+         'Env. + demographic traits',
+         'Env. + all traits',
+         'Mean',
+         'Standard Deviation',
+         'Difference to observed')
+names(lbl) <- c('env','disp','lh','all','mean','sd','diff')
+
+# Splitting per stats for plotting, because of different scales:
+plotready_mean <- plotready %>% filter(stat == 'mean')
+plotready_sd <- plotready %>% filter(stat == 'sd')
+plotready_diff <- plotready %>% filter(stat == 'diff')
+save.image('predGenDiff.RData')
+```
+
+Plotting:
+
+```{r}
+### Mean
+#Raster
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = plotready_mean, mapping = aes(x=mid_long,y=mid_lat,fill=values))+
+  scale_fill_gradient2(name = expression(paste('Mean predicted ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',midpoint = max(plotready_mean$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_mean_raster_raw.png',
+       width = 15, height = 10, dpi = 600)
+
+# Points
+plotready_mean <- plotready_mean %>% arrange(predictors,values)
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_point(data = plotready_mean, mapping = aes(x=mid_long,y=mid_lat,color=values))+
+  scale_color_gradient2(name = expression(paste('Mean predicted ',D[XY])),
+                        low = '#2b83ba', mid = '#fffebd', high = '#d7191c',midpoint = max(plotready_mean$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_mean_points.png',
+       width = 15, height = 10, dpi = 600)
+
+### SD
+#Raster
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = plotready_sd, mapping = aes(x=mid_long,y=mid_lat,fill=values))+
+  scale_fill_gradient2(name = expression(paste('SD of predicted ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',midpoint = max(plotready_sd$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_sd_raster_raw.png',
+       width = 15, height = 10, dpi = 600)
+
+# Points
+plotready_sd <- plotready_sd %>% arrange(predictors,values)
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_point(data = plotready_sd, mapping = aes(x=mid_long,y=mid_lat,color=values))+
+  scale_color_gradient2(name = expression(paste('SD of predicted ',D[XY])),
+                        low = '#2b83ba', mid = '#fffebd', high = '#d7191c',midpoint = max(plotready_sd$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_sd_points.png',
+       width = 15, height = 10, dpi = 600)
+
+### Diff
+#Raster
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = plotready_diff, mapping = aes(x=mid_long,y=mid_lat,fill=values))+
+  scale_fill_gradient2(name = expression(paste('Difference to obs. ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = 0)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_diff_raster_raw.png',
+       width = 15, height = 10, dpi = 600)
+
+# Points
+plotready_diff <- plotready_diff %>% arrange(predictors,values)
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_point(data = plotready_diff,
+             mapping = aes(x=mid_long,y=mid_lat,color=values))+
+  scale_color_gradient2(name = expression(paste('Difference to obs. ',D[XY])),
+                        low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                        midpoint = 0)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]), ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_diff_points.png',
+       width = 15, height = 10, dpi = 600)
+```
+
+#### Interpolating
+
+```{r}
+# Creating spatial points to use in idw
+idw_midpoints <- SpatialPointsDataFrame(data.frame(x = rf_plot$mid_long,
+                                                   y = rf_plot$mid_lat),
+                                        data = rf_plot %>% select(dxy_resc,
+                                                                  mean_env_resc,
+                                                                  sd_env_resc,
+                                                                  diff_env_resc,
+                                                                  mean_disp_resc,
+                                                                  sd_disp_resc,
+                                                                  diff_disp_resc,
+                                                                  mean_lh_resc,
+                                                                  sd_lh_resc,
+                                                                  diff_lh_resc,
+                                                                  mean_all_resc,
+                                                                  sd_all_resc,
+                                                                  diff_all_resc))
+crs(idw_midpoints) <- study_crs
+
+# CHECK DISTRIBUTION OF VALUES FOR EACH VARIABLE AND THINK OF REMOVING VALUES TOO LOW
+# OR VALUES THAT ARE 0, TO AID THE INTERPOLATION IN HIGHLIGHTING AREAS OF TURNOVER
+
+# Code below from https://mgimond.github.io/Spatial/interpolation-in-r.html
+grd <- georaster %>% rasterToPoints() %>% data.frame() %>% select(c(1,2))
+coordinates(grd) <- names(grd) <- c("X", "Y")
+# Create SpatialPixel and SpatialGrid objects
+fullgrid(grd) <- gridded(grd) <- TRUE
+# Setting projection
+crs(grd) <- crs(idw_midpoints)
+```
+
+Interpolating observed values with idp of 5 and masking with AF shapefile:
+
+```{r}
+obs_idw <- gstat::idw(dxy_resc ~ 1,
+                      idw_midpoints,
+                      newdata=grd,
+                      idp=5) %>%
+  raster() %>% 
+  raster::mask(as_Spatial(af_shapefile))
+```
+
+Plotting raster of observed values:
+
+```{r}
+idp_obs <- data.frame(rasterToPoints(obs_idw))
+colnames(idp_obs) <- c('x','y','values')
+### Mean
+#Raster
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1,fill= "ghostwhite")+
+  #geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = idp_obs, mapping = aes(x=x,y=y,fill=values))+
+  scale_fill_gradient2(name = expression(paste('Mean predicted ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = max(idp_obs$values)/2)+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]),
+           ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed",
+                                        size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/obs_dxy_idp.png',
+       width = 15, height = 10, dpi = 600)
+```
+
+Interpolating predicted values with idp of 5 and masking with AF shapefile:
+
+```{r}
+pred_idw <- stack()
+for (i in 1:length(pred_idw)) {
+  stat <- colnames(idw_midpoints@data)[i+1]
+  message('Interpolating: ',stat)
+  r <- gstat::idw(get(stat) ~ 1,
+                  idw_midpoints, newdata=grd,
+                  idp=5) %>%
+  raster() %>% 
+  raster::mask(as_Spatial(af_shapefile))
+  pred_idw <- stack(pred_idw,r)
+  message('')
+}
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+Extracting values and plotting:
+
+```{r}
+idp_table <- data.frame(rasterToPoints(pred_idw)) %>%
+  pivot_longer(ends_with('resc'),names_to = 'model', values_to = 'values') %>% 
+  mutate(stat = str_split_i(model,'_',1),
+         predictors = str_split_i(model,'_',2))
+idp_table$stat <- factor(idp_table$stat, levels = c('mean','sd','diff'))
+idp_table$predictors <- factor(idp_table$predictors,
+                               levels = c('env','disp','lh','all'))
+
+### Mean
+#Raster
+idp_plot <- idp_table %>% filter(stat == 'mean')
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  #geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = idp_plot, mapping = aes(x=x,y=y,fill=values))+
+  scale_fill_gradient2(name = expression(paste('Mean predicted ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = max(idp_plot$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]),
+           ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed",
+                                        size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_mean_raster_idp.png',
+       width = 15, height = 10, dpi = 600)
+
+### SD
+#Raster
+idp_plot <- idp_table %>% filter(stat == 'sd')
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  #geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = idp_plot, mapping = aes(x=x,y=y,fill=values))+
+  scale_fill_gradient2(name = expression(paste('SD of predicted ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = max(idp_plot$values)/2)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]),
+           ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed",
+                                        size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_sd_raster_idp.png',
+       width = 15, height = 10, dpi = 600)
+
+### Diff
+#Raster
+idp_plot <- idp_table %>% filter(stat == 'diff')
+theme_set(theme_bw())
+ggplot()+
+  geom_sf(data = samer, size = 0.1)+
+  #geom_sf(data = buf,alpha = 0.1,fill='lightgrey')+
+  geom_sf(data = af_shapefile,alpha = 0.2,fill = 'lightgreen' )+
+  geom_tile(data = idp_plot, mapping = aes(x=x,y=y,fill=values))+
+  scale_fill_gradient2(name = expression(paste('Difference to obs. ',D[XY])),
+                       low = '#2b83ba', mid = '#fffebd', high = '#d7191c',
+                       midpoint = 0)+
+  facet_wrap(~predictors,nrow = 1,
+             labeller = labeller(predictors = lbl))+
+  geom_sf(data = af_rivers, size = 0.6, color = 'blue')+
+  labs(x = 'Longitude',y='Latitude')+
+  coord_sf(xlim = c(study_area[1],study_area[2]),
+           ylim = c(study_area[3],study_area[4]), expand = FALSE)+
+  theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed",
+                                        size = 0),
+        panel.background = element_rect(fill = "aliceblue"))
+ggsave('output/maps/global/predictions/pred_diff_raster_idp.png',
+       width = 15, height = 10, dpi = 600)
+```
+
+### 7.3 Organizing and plotting spp-specific observed and predicted D~XY~ values
+
+Adding spp-specific predictions to rf_data:
+
+```{r modify_rf_data}
+
+rf_data <- rf_data %>% mutate(spcv_env_pred = spcv_env_pred,
+                              spcv_env_disp_pred = spcv_env_disp_pred,
+                              spcv_env_lh_pred = spcv_env_lh_pred,
+                              spcv_env_all_pred = spcv_env_all_pred)
+
+# Predictions from each spcv model were reordered based on the row of the testing set (i.e., the focal species)
+# That row matches the rf_data row, since rf_data was never arranged in any way inside the code.
+# This is why we can just use mutate and add the ordered predictions.
+```
+
+Plotting as points:
+
+> RENAME THIS CODE SO INTERPOLATION OBJECTS DONT REPLACE PREVIOUS OBJECTS
+
+```{r warning=FALSE, results='hide'}
+alignments <- sort(unique(rf_data$alignment))
+
+for (i in alignments) {
+  # Filtering for the alignment
+  idw_data <- rf_data %>% filter(alignment == i) %>% select(pop1,pop2,long1,lat1,long2,lat2,
+                                                            mid_long,mid_lat,dxy,spcv_env_pred,
+                                                            spcv_env_disp_pred,spcv_env_lh_pred,
+                                                            spcv_env_all_pred)
+  
+  # Creating localities list to plot
+  spp <- str_split(i,' - ', simplify = TRUE)
+  locs <- afmtdna %>% filter((otu == spp[1]) & (locus == spp[2])) %>% select(longitude,latitude) %>%
+    distinct(longitude,latitude)
+    
+  
+  
+  # Re-scaling
+  idw_data <- idw_data %>% mutate(spcv_env_pred = rescale(spcv_env_pred,to = c(min(idw_data$dxy),
+                                                                               max(idw_data$dxy))),
+                                  spcv_env_disp_pred = rescale(spcv_env_disp_pred,to = c(min(idw_data$dxy),
+                                                                                         max(idw_data$dxy))),
+                                  spcv_env_lh_pred = rescale(spcv_env_lh_pred,to = c(min(idw_data$dxy),
+                                                                                     max(idw_data$dxy))),
+                                  spcv_env_all_pred = rescale(spcv_env_all_pred,to = c(min(idw_data$dxy),
+                                                                                       max(idw_data$dxy))))
+  
+  # Creating interpolation data
+  idw_midpoints <- SpatialPointsDataFrame(data.frame(x = idw_data$mid_long,
+                                                     y = idw_data$mid_lat),
+                                          data = data.frame(dxy = idw_data$dxy,
+                                                            spcv_env_pred = idw_data$spcv_env_pred,
+                                                            spcv_env_disp_pred = idw_data$spcv_env_disp_pred,
+                                                            spcv_env_lh_pred = idw_data$spcv_env_lh_pred,
+                                                            spcv_env_all_pred = idw_data$spcv_env_all_pred))
+  crs(grd) <- crs(idw_midpoints) <- study_crs
+  
+  # Creating buffer and extracting extent for plotting
+  #MAKE BUFFER BASED ON LOCALITIES OF THE SPECIES AND NOT MID POINTS
+  sp_buf <- rgeos::gBuffer(SpatialPoints(locs),width = 6)
+  crs(sp_buf) <- study_crs
+  sp_ex <- extent(sp_buf) %>% as.vector()
+  
+  # Interpolating
+  message('Interpolating observed values for ',i)
+  obs_idw <- gstat::idw(dxy ~ 1, idw_midpoints, newdata=grd, idp=5) %>% raster()
+  message('')
+  
+  message('Interpolating env only predicted values for ',i)
+  env_idw <- gstat::idw(spcv_env_pred ~ 1, idw_midpoints, newdata=grd, idp=5) %>% raster()
+  message('')
+  
+  message('Interpolating env + disp predicted values for ',i)
+  env_disp_idw <- gstat::idw(spcv_env_disp_pred ~ 1, idw_midpoints, newdata=grd, idp=5) %>% raster()
+  message('')
+  
+  message('Interpolating env + lh predicted values for ',i)
+  env_lh_idw <- gstat::idw(spcv_env_lh_pred ~ 1, idw_midpoints, newdata=grd, idp=5) %>% raster()
+  message('')
+  
+  message('Interpolating env + all preducted values for ',i)
+  env_all_idw <- gstat::idw(spcv_env_all_pred ~ 1, idw_midpoints, newdata=grd, idp=5) %>% raster()
+  message('')
+  
+  r <- stack(obs_idw,env_idw,env_disp_idw,env_lh_idw,env_all_idw)
+  r <- raster::mask(r,sp_buf)
+  
+  # Extracting data and plot
+  table <- data.frame(rasterToPoints(r))
+  colnames(table) <- c('x','y','obs_idw','env_idw','env_disp_idw','env_lh_idw','env_all_idw')
+  table <- pivot_longer(table,ends_with('idw'),names_to = 'model', values_to = 'values')
+  table$model <- factor(table$model, levels = c('obs_idw','env_idw','env_disp_idw','env_lh_idw','env_all_idw'),
+                        labels = c('Observed values','Predicting values - Env. only',
+                                   'Predicted values - Env. + dispersal traits',
+                                   'Predicted values - Env. + demographic traits',
+                                   'Predicted values - Env. + all traits'))
+  
+  message('Plotting...')
+  theme_set(theme_bw())
+  ggplot()+
+    geom_sf(data = samer, size = 0.1)+
+    geom_sf(data = af_shapefile,alpha = 0.2)+
+    geom_tile(data = table, aes(x=x,y=y,fill=values))+
+    scale_fill_gradient2(low = '#2b83ba', mid = '#fffebd', high = '#d7191c',midpoint = max(table$values)/2)+
+    facet_wrap(~model, nrow = 1)+
+    geom_point(data = locs,mapping = aes(x=longitude,y=latitude),alpha=0.5)+
+    coord_sf(xlim = c(sp_ex[1],sp_ex[2]), ylim = c(sp_ex[3],sp_ex[4]), expand = FALSE)+
+    theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
+          panel.background = element_rect(fill = "aliceblue"))
+  ggsave(paste0('output/maps/obs_pred_dxy/obs_pred_dxy_per_spp/',gsub(' ','_',i),'.tiff'),
+                width = 15, height = 9)
+  message('')
+  message('')
+}
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```

@@ -1,0 +1,331 @@
+---
+title: "5. Exploring model results and evaluation metrics"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+> #### Summary
+>
+> -   
+>
+> ##### Data required
+>
+> ##### Data generated
+>
+> ##### Package sutilized
+>
+> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+
+------------------------------------------------------------------------
+
+### Exploring metrics for the global model
+
+Plotting - Figure 2A:
+
+```{r}
+rsq_global_plot <- pivot_longer(model_rsq, starts_with('env'),names_to = "model", values_to = "rsq") %>% 
+  mutate(model = factor(model)) %>% mutate(model = fct_inorder(model))
+
+ggplot(rsq_global_plot,aes(y=rsq,x=model,fill=model))+geom_boxplot()+
+  labs(x = 'Set of predictors',y=bquote(R^2))+
+  scale_x_discrete(labels = c("Environment only", "Envir. + disp. traits",
+                                 "Envir. + demographic traits", "Envir. + all traits"))+
+  theme(legend.position = "none")
+#ggsave('output/random_forest/rsq_distribution.tiff',width = 9,height = 7)
+ggsave('output/random_forest/global/rsq_distribution.png',width = 9,height = 7,dpi=1200)
+```
+
+Testing if distributions are different:
+
+```{r}
+kruskal.test(rsq ~ model, model_rsq)
+```
+
+Testing if `env_disp` is higher than `env_only`:
+
+```{r}
+wilcox.test(model_rsq$env_disp_rsq,model_rsq$env_rsq,alternative = 'g')
+```
+
+> Models with dispersal traits have higher R^2^ than models with environment only.
+
+Testing if `env_lh` is higher than `env_only`:
+
+```{r}
+wilcox.test(model_rsq$env_lh_rsq,model_rsq$env_rsq,alternative = 'g')
+```
+
+> Models with life history traits have higher R^2^ than models with environment only, although to a slightly lesser extent.
+
+Testing if `env_all` is higher than `env_only`:
+
+```{r}
+wilcox.test(model_rsq$env_all,model_rsq$env,alternative = 'g')
+```
+
+> Models that add all traits have higher R^2^ than models with environment only.
+
+Testing if `env_disp` is different than `env_lh`:
+
+```{r}
+wilcox.test(model_rsq$env_disp,model_rsq$env_lh,alternative = 'g')
+```
+
+> R^2^ of models with dispersal traits only are consistently higher than models with life history traits only.
+
+Calculating differences and testing whether `env_disp` differences are higher than `env_lh` differences.
+
+```{r}
+model_rsq <- model_rsq %>% mutate(disp_diff = env_disp_rsq - env_rsq,
+                                  lh_diff = env_lh_rsq - env_rsq,
+                                  all_diff = env_all_rsq - env_rsq)
+wilcox.test(model_rsq$disp_diff,model_rsq$lh_diff,alternative = 'g')
+```
+
+> The increase in R^2^ from including traits is higher when including dispersal traits than when including life history traits.
+
+Plotting the distribution of differences - Figure 2B:
+
+```{r}
+rsq_increase_plot <- pivot_longer(model_rsq, c(disp_diff, lh_diff, all_diff), names_to = "model", values_to = "diff") %>% 
+  dplyr::select(model,diff) %>% mutate(model = factor(model)) %>% mutate(model = fct_inorder(model))
+
+ggplot(rsq_increase_plot,aes(y=diff,x=model,fill=model))+geom_boxplot()+
+  labs(x = 'Set of predictors',y=bquote(.("Difference in") ~ R^2))+
+  scale_x_discrete(labels = c("Envir. + disp. traits",
+                                 "Envir. + demographic traits", "Evir. + all traits"))+
+  theme(legend.position = "none")
+ggsave('output/random_forest/global/rsq_diff_distribution.png',width = 9,height = 7,dpi=1200)
+
+```
+
+Summarizing variation in model estimates:
+
+```{r}
+metrics_sum <- model_rsq %>% pivot_longer(starts_with('env'),names_to = 'model',values_to = 'rmse') %>%
+  select(c(model,rmse)) %>% group_by(model) %>% summarize(mean = mean(rmse),median = median(rmse),sd = sd(rmse),
+                                                       min=min(rmse),max=max(rmse))
+```
+
+### Variable importance
+
+One thought here is: do I want to use all 100 models to 1) have average variable importance; 2) perform global predictions and then have a distribution of predictions for each midpoint, based on these different models (that came from different species cross-validation training/testing splits)? This would mean to 1) keep all 100 models saved in the memory; 2) calculate distribution of the importance of variables across models and distribution of the predicted values.
+
+Extracting important variables from 100 replicates - Aug 16, 2023:
+
+```{r}
+#load('/media/6TB/rilquer_RData/predictingGenDiff/global_models.RData')
+var_data <- vector('list',length(global_models))
+var_imp <- vector('list',length(global_models))
+for (i in 1:length(global_models)) {
+  var_data[[i]] <- global_models[[i]] %>% lapply(extract_workflow) %>% 
+    lapply(extract_fit_parsnip) %>% lapply(vi)
+  var_imp[[i]] <- var_data[[i]][[1]]
+  for (j in 2:length(var_data[[i]])) {
+    var_imp[[i]] <- left_join(var_imp[[i]],var_data[[i]][[j]], by = 'Variable')
+  }
+}
+names(var_imp) <- c('env_fit','env_disp_fit','env_lh_fit','env_all_fit')
+lapply(var_imp,function(x){colnames(x) <- c('Variable',paste0('rep',1:100))})
+save('var_imp',file='/media/6TB/rilquer_RData/predictingGenDiff/var_imp.RData')
+```
+
+Calculating mean, median
+
+```{r}
+var_imp=lapply(var_imp,function(x){x %>% rowwise() %>%
+    mutate(mean = mean(c_across(starts_with('rep'))),
+           median = median(c_across(starts_with('rep'))),
+           sd = sd(c_across(starts_with('rep'))))})
+save('var_imp',file='/media/6TB/rilquer_RData/predictingGenDiff/var_imp.RData')
+```
+
+Plotting with boxplot - parts of Figure 3:
+
+```{r}
+var_imp_long <- lapply(var_imp,function(x){arrange(x,desc(mean)) %>%
+    pivot_longer(cols = starts_with('rep'),
+                 names_to = 'rep',
+                 values_to = 'value') %>% 
+    left_join(predictors, by = c('Variable' = 'var'))})
+for (i in 1:length(var_imp_long)) {
+  var_imp_long[[i]]$names <- factor(var_imp_long[[i]]$names,
+                                       levels = unique(var_imp_long[[i]]$names))
+}
+theme_set(theme_bw()) #Setting theme
+for (i in 1:length(var_imp_long)) {
+  ggplot(var_imp_long[[i]],aes(x=names,y=value))+geom_boxplot()+
+    theme(axis.text.x = element_text(angle = 70, hjust = 1))+
+    xlab('Variables')+ylab('Importance')
+  ggsave(paste0('output/random_forest/global/var_imp/var_imp_',names(var_imp_long)[i],'.png'),width = 9,height = 7,dpi=1200)
+}
+```
+
+Saving image:
+
+```{r}
+#rm(global_models)
+save.image('predGenDiff.RData')
+```
+
+### Exploring species cross-validation evaluation metrics
+
+Plotting R^2^ per model
+
+```{r}
+ggplot(spcv_metrics,aes(y = rsq, x = model,fill=model))+geom_boxplot()+
+  labs(x = 'Set of predictors',y=bquote(R^2))+
+  scale_x_discrete(labels = c("Environment only", "Envir. + disp. traits",
+                                 "Envir. + demographic traits", "Envir. + all traits"))+
+  theme(legend.position = "none")
+ggsave('output/random_forest/spp-spec/spcv_rsq_range.png',width = 10, height = 7,dpi=1200)
+
+#spcv_metrics$model <- factor(spcv_metrics$model, levels = c('env_only','env_disp','env_lh','env_all'),
+#                        labels = c('Env. only','Env. + dispersal traits',
+#                                   'Env. + demographic traits',
+#                                   'Env. + all traits'))
+
+#spcv_metrics$set <- factor(spcv_metrics$set,
+#                           levels = rev(sort(unique(spcv_metrics$set))))
+
+ggplot(spcv_metrics,aes(y=set,x=rsq,color=model))+
+  geom_vline(xintercept = 0,color = 'red',linetype = 'dashed')+
+  geom_vline(xintercept = 0.5,color = 'orange',linetype = 'dashed')+
+  geom_point(size = 2)+
+  theme(axis.text.x = element_text(angle = 70, hjust = 1))+
+  labs(y = 'Species + Locus',x=bquote(R^2),color = 'Set of predictors')
+ggsave('output/random_forest/spp-spec-da/spcv_rsq_per_spp.png',width = 10, height = 7,dpi=1200)
+```
+
+Plotting rsq and sample sizes:
+
+```{r}
+ggplot(spcv_metrics,aes(x=rsq,y=sample_size))+geom_point()
+```
+
+Testing for differences in r-squared between models:
+
+```{r}
+# Creating data.frames
+spcv_rsq_values <- spcv_metrics %>% dplyr::select(-rmse) %>%
+  pivot_wider(names_from = model, values_from = rsq)
+
+wilcox.test(spcv_rsq_values$env_disp, spcv_rsq_values$env_only,
+            paired = TRUE,alternative = "g")
+
+wilcox.test(spcv_rsq_values$env_lh, spcv_rsq_values$env_only,
+            paired = TRUE, alternative = "g")
+
+wilcox.test(spcv_rsq_values$env_all, spcv_rsq_values$env_only,
+            paired = TRUE,alternative = "g")
+
+```
+
+> Results: adding any kind of traits help.
+
+Testing whether dispersal traits increase r-squared more than life history traits:
+
+```{r}
+spcv_rsq_values <- spcv_rsq_values %>% mutate(disp_diff = env_disp-env_only,
+                                              lh_diff = env_lh-env_only,
+                                              all_diff = env_all-env_only)
+spcv_rsq_values_plot <- pivot_longer(spcv_rsq_values,cols = c(disp_diff,lh_diff,all_diff),
+                                     names_to = "model",values_to = "diff") %>% 
+  mutate(model = factor(model)) %>% mutate(model = fct_inorder(model))
+
+wilcox.test(spcv_rsq_values$disp_diff, spcv_rsq_values$lh_diff,
+            paired = TRUE,alternative = "g")
+```
+
+Visualizing:
+
+```{r}
+theme_set(theme_bw()) #Setting theme
+ggplot(spcv_rsq_values_plot,aes(y=diff,x=model,fill=model))+geom_boxplot()+
+  labs(x = 'Set of predictors',y=bquote(.("Difference in") ~ R^2))+
+  scale_x_discrete(labels = c("Envir. + disp. traits",
+                                 "Envir. + demographic traits", "Evir. + all traits"))+
+  theme(legend.position = "none")
+ggsave('output/random_forest/spp-spec/spcv_rsq_diff_distribution.png',
+       width = 9,height = 7,dpi=1200)
+```
+
+Counting how many times out of all cross-validations dispersal traits vs life history traits were higher ranked:
+
+```{r}
+highest_rsq <- c()
+for (i in 1:nrow(spcv_rsq_values)) {
+  vec <- c(env_only = spcv_rsq_values$env_only[i],
+           env_disp = spcv_rsq_values$env_disp[i],
+           env_lh = spcv_rsq_values$env_lh[i],
+           env_all = spcv_rsq_values$env_all[i])
+  highest_rsq <- c(highest_rsq,names(vec)[which(vec == max(vec))])
+}
+spcv_rsq_values <- spcv_rsq_values %>% mutate(highest_rsq = highest_rsq)
+table(spcv_rsq_values$highest_rsq)/37
+```
+
+> Overall, the best model included only dispersal traits in 50% of the cases.
+
+```{r}
+rsq1 <- spcv_rsq_values %>% filter(highest_rsq == 'env_only') %>%
+  dplyr::select(highest_rsq,env_only) %>% rename(env_only = 'rsq')
+
+rsq2 <- spcv_rsq_values %>% filter(highest_rsq == 'env_disp') %>%
+  dplyr::select(highest_rsq,env_disp) %>% rename(env_disp = 'rsq')
+
+rsq3 <- spcv_rsq_values %>% filter(highest_rsq == 'env_lh') %>%
+  dplyr::select(highest_rsq,env_lh) %>% rename(env_lh = 'rsq')
+
+rsq4 <- spcv_rsq_values %>% filter(highest_rsq == 'env_all') %>%
+  dplyr::select(highest_rsq,env_all) %>% rename(env_all = 'rsq')
+
+highest_rsq_values <- bind_rows(rsq1,rsq2,rsq3,rsq4)
+
+highest_rsq_values$highest_rsq <- factor(highest_rsq_values$highest_rsq,
+                                         levels = c('env_only','env_disp',
+                                                    'env_lh','env_all'),
+                                         labels = c('Env. only',
+                                                    'Env. + dispersal traits',
+                                                    'Env. + demographic traits',
+                                                    'Env. + all traits'))
+
+ggplot(highest_rsq_values,aes(x = highest_rsq,y=rsq,fill=highest_rsq))+geom_boxplot()+
+  labs(x = 'Set of predictors',y=bquote(R^2))+
+  scale_x_discrete(labels = c("Environment only", "Envir. + disp. traits",
+                                 "Envir. + demographic traits", "Envir. + all traits"))+
+  theme(legend.position = "none")
+ggsave('output/random_forest/spp-spec/spcv_rsq_best.png',width = 10, height = 7,dpi=1200)
+```
+
+Are differences in the increment of r-squared due to sample size?
+
+```{r}
+ggplot(spcv_rsq_values_plot,aes(x=diff,y=sample_size,color = model))+geom_point()
+```
+
+Are differences in the best model due to sample size?
+
+```{r}
+ggplot(spcv_rsq_values,aes(x = highest_rsq,y=sample_size))+geom_violin()
+```
+
+Other things that increment in R^2^ and the best model can be due to:
+
+1.  The actual relationship between predictor and response
+2.  Value range of the response variable
+3.  Range size of the species
+4.  Presence-absence of reported phylogeographic break in the manuscript
+5.  Location of breaks (southern vs northern)
+6.  Species range - southern, northern, southern-central, all AF
+
+> ORGANIZE THIS DATA, ADD IT HERE, AND USE LEFT JOIN TO ADD TO CV_RSQ_VALUES
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### Visualizing range of response and predictor variables

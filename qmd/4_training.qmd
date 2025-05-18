@@ -1,0 +1,340 @@
+---
+title: "4. Training Random Forest models"
+author: "Rilquer Mascarenhas"
+format: html
+editor: visual
+---
+
+> #### Summary
+>
+> -   
+>
+> ##### Data required
+>
+> ##### Data generated
+>
+> ##### Package sutilized
+>
+> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+Tidymodels approach:
+
+Creating folders to save model info:
+
+```{r}
+dir.create('output/random_forest/')
+```
+
+### Tuning the model
+
+First, let's create recipe and workflow to tune using the entire dataset:
+
+```{r message=FALSE,warning=FALSE,eval=FALSE}
+require(tidymodels)
+# Detecting cores
+cores <- parallel::detectCores()
+
+# Creating recipe to set data and update roles
+tune_rec <- 
+  recipe(dxy ~ ., data = rf_data) %>%  
+  
+  # Adding roles as ID, flagging variables that are not to be used in the analysis
+  update_role(otu,alignment,pop1,pop2,long1,lat1,long2,lat2,mid_long,mid_lat, new_role = "ID")
+
+# Creating split for tuning
+set.seed(234)
+val_set <- validation_split(rf_data, 
+                            strata = dxy, 
+                            prop = 0.70)
+
+# Creating model for tuning
+tune_mod <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = tune()) %>% 
+  set_engine("ranger", num.threads = cores) %>% 
+  set_mode("regression")
+
+
+# Creating workflow for tuning
+tune_workflow <- 
+  workflow() %>% 
+  add_model(tune_mod) %>% 
+  add_recipe(tune_rec)
+
+# Run tuning
+tune_res <- 
+  tune_workflow %>% 
+  tune_grid(val_set,
+            grid = 30,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(rsq))
+# Plotting results
+autoplot(tune_res)
+ggsave('output/random_forest/tune_res.tiff',width = 9, height = 7)
+
+tuning <- tune_res %>% 
+  collect_metrics()
+
+tune_res %>% 
+  show_best("rmse")
+```
+
+Creating model with best parameters:
+
+```{r}
+rf_mod <- 
+  rand_forest(mtry = 16, min_n = 2, trees = 1897) %>% 
+  set_engine("ranger", num.threads = cores, importance = "impurity") %>% 
+  set_mode("regression")
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
+
+### Setting recipes and workflows
+
+Creating recipes and workflow. Here is where I create four workflows, each with a different combination of predictor variables: 1) environment only; 2) environment + dispersal traits; 3) environment + life table traits; 4) environment + all ecological traits. These workflows are added to the same model, but the formula differ by subsetting the predictors accordingly. Random forest model is created first with default parameters (to be tuned later).
+
+```{r}
+#Environment-only
+env_recipe <- 
+  recipe(dxy ~ ., data = (rf_data %>%
+                            dplyr::select(-c(body_size_hbw,for_str_hbw_n,diet_hbw_n,
+                                             sensit_stotz,tarsus_length,wing_length,
+                                             survival,age_first,longevity,gen_length)))) %>%
+  # Adding roles as ID, flagging variables that are not to be used in the analysis
+  update_role(otu,alignment,pop1,pop2,long1,lat1,long2,lat2,mid_long,mid_lat, new_role = "ID")
+
+#Environment + dispersal traits
+env_disp_recipe <- 
+  recipe(dxy ~ ., data = (rf_data %>%
+                            dplyr::select(-c(survival,age_first,longevity,gen_length)))) %>%
+  # Adding roles as ID, flagging variables that are not to be used in the analysis
+  update_role(otu,alignment,pop1,pop2,long1,lat1,long2,lat2,mid_long,mid_lat, new_role = "ID")
+
+#Environment + life history traits
+env_lh_recipe <- 
+  recipe(dxy ~ ., data = (rf_data %>%
+                            dplyr::select(-c(body_size_hbw,for_str_hbw_n,diet_hbw_n,
+                                             sensit_stotz,tarsus_length,wing_length)))) %>%
+  # Adding roles as ID, flagging variables that are not to be used in the analysis
+  update_role(otu,alignment,pop1,pop2,long1,lat1,long2,lat2,mid_long,mid_lat, new_role = "ID")
+
+#Environment + all ecological traits
+env_all_recipe <- 
+  recipe(dxy ~ ., data = rf_data) %>%
+  # Adding roles as ID, flagging variables that are not to be used in the analysis
+  update_role(otu,alignment,pop1,pop2,long1,lat1,long2,lat2,mid_long,mid_lat, new_role = "ID")
+```
+
+We then create workflows for each recipe using the random forest setting built above:
+
+```{r}
+env_workflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(env_recipe)
+
+env_disp_workflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(env_disp_recipe)
+
+env_lh_workflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(env_lh_recipe)
+
+env_all_workflow <- workflow() %>% 
+  add_model(rf_mod) %>% 
+  add_recipe(env_all_recipe)
+```
+
+### Running models
+
+Create models for each workflow with 0.7 training and testing to get variable but grouping based on alignment. Running 100 models to get a distribution of evaluation metrics.
+
+> Using group split allows for whole species/alignments to be removed from the training dataset, effectively testing how well the model is doing in predicting something totally out of their range.
+
+```{r}
+set.seed(NULL)
+reps <- 100
+env_rsq <- env_disp_rsq <- env_lh_rsq <- env_all_rsq <- vector('numeric',reps)
+env_fit <- env_disp_fit <- env_lh_fit <- env_all_fit <- vector('list',reps)
+for (i in 1:reps) {
+  group_split <- group_initial_split(rf_data, prop = 0.7, group = alignment)
+  
+  message('Fitting environment only - rep ',i)
+  env_fit[[i]] <-
+    env_workflow %>% 
+    last_fit(group_split)
+  
+  message('Fitting envir + disp traits - rep ',i)
+  env_disp_fit[[i]] <-
+    env_disp_workflow%>% 
+    last_fit(group_split)
+  
+  message('Fitting envir + life history traits - rep ',i)
+  env_lh_fit[[i]] <-
+    env_lh_workflow %>% 
+    last_fit(group_split)
+  
+  message('Fitting envir + all traits - rep ',i)
+  env_all_fit[[i]] <-
+    env_all_workflow %>% 
+    last_fit(group_split)
+  
+  env_rsq[i] <- env_fit[[i]]$.metrics[[1]]$.estimate[2]
+  env_disp_rsq[i] <- env_disp_fit[[i]]$.metrics[[1]]$.estimate[2]
+  env_lh_rsq[i] <- env_lh_fit[[i]]$.metrics[[1]]$.estimate[2]
+  env_all_rsq[i] <- env_all_fit[[i]]$.metrics[[1]]$.estimate[2]
+  
+  message('')
+}
+#Merging metrics
+model_rsq <- tibble(env_rsq,env_disp_rsq,env_lh_rsq,env_all_rsq)
+rm(env_rsq,env_disp_rsq,env_lh_rsq,env_all_rsq)
+global_models <- list(env_fit,env_disp_fit,env_lh_fit,env_all_fit)
+rec_names <- c('env_fit','env_disp_fit','env_lh_fit','env_all_fit')
+names(global_models) <- rec_names
+rm(env_fit,env_disp_fit,env_lh_fit,env_all_fit)
+save('global_models',file = '/media/6TB/rilquer_RData/predictingGenDiff/global_models.RData')
+rm(global_models) # Removing to save smaller image
+save.image('predGenDiff.RData')
+```
+
+Merging metrics:
+
+```{r}
+
+```
+
+### Species cross-validation
+
+Now we fit each workflow to our dataset using a cross-validation based on the species, i.e. we are specifically asking how well our model is in predicting each species.
+
+```{r}
+# Generating resampling scheme based on species
+set.seed(234)
+folds <- group_vfold_cv(rf_data, group = alignment)
+
+# Getting the alignment info for each split in the folds
+fold_name <- c()
+sample_size <- c()
+for (i in 1:length(folds$splits)) {
+  set_name <- rf_data %>% dplyr::slice(-c(folds$splits[[i]]$in_id))
+  sample_size <- c(sample_size,nrow(set_name))
+  set_name <- set_name %>% dplyr::select(alignment) %>% summarise(unique(alignment)) %>%
+    as.character()
+  fold_name <- c(fold_name,set_name)
+}
+fold_info <- data.frame(fold_name,sample_size)
+
+spcv_env_fit <-
+  env_workflow %>% 
+  fit_resamples(folds, control = control_resamples(save_pred = TRUE))
+
+spcv_env_disp_fit <-
+  env_disp_workflow%>% 
+  fit_resamples(folds, control = control_resamples(save_pred = TRUE))
+
+spcv_env_lh_fit <-
+  env_lh_workflow %>% 
+  fit_resamples(folds, control = control_resamples(save_pred = TRUE))
+
+spcv_env_all_fit <-
+  env_all_workflow %>% 
+  fit_resamples(folds, control = control_resamples(save_pred = TRUE))
+set.seed(NULL)
+```
+
+### Retrieving RMSE and R^2^
+
+Checking mean error:
+
+```{r}
+collect_metrics(spcv_env_fit)
+collect_metrics(spcv_env_disp_fit)
+collect_metrics(spcv_env_lh_fit)
+collect_metrics(spcv_env_all_fit)
+```
+
+Getting error per alignment:
+
+```{r}
+set <- c()
+sample_size <- c()
+species <- c()
+locus <- c()
+rmse <- c()
+rsq <- c()
+for (i in 1:length(spcv_env_fit$.metrics)) {
+  rmse <- c(rmse,spcv_env_fit$.metrics[[i]]$.estimate[1])
+  rsq <- c(rsq,spcv_env_fit$.metrics[[i]]$.estimate[2])
+  set <- c(set,fold_info$fold_name[i])
+  sample_size <- c(sample_size,fold_info$sample_size[i])
+  species <- c(species,unlist(str_split(fold_name[i],' - '))[1])
+  locus <- c(locus,unlist(str_split(fold_name[i],' - '))[2])
+}
+for (i in 1:length(spcv_env_disp_fit$.metrics)) {
+  rmse <- c(rmse,spcv_env_disp_fit$.metrics[[i]]$.estimate[1])
+  rsq <- c(rsq,spcv_env_disp_fit$.metrics[[i]]$.estimate[2])
+  set <- c(set,fold_info$fold_name[i])
+  sample_size <- c(sample_size,fold_info$sample_size[i])
+  species <- c(species,unlist(str_split(fold_name[i],' - '))[1])
+  locus <- c(locus,unlist(str_split(fold_name[i],' - '))[2])
+}
+for (i in 1:length(spcv_env_lh_fit$.metrics)) {
+  rmse <- c(rmse,spcv_env_lh_fit$.metrics[[i]]$.estimate[1])
+  rsq <- c(rsq,spcv_env_lh_fit$.metrics[[i]]$.estimate[2])
+  set <- c(set,fold_info$fold_name[i])
+  sample_size <- c(sample_size,fold_info$sample_size[i])
+  species <- c(species,unlist(str_split(fold_name[i],' - '))[1])
+  locus <- c(locus,unlist(str_split(fold_name[i],' - '))[2])
+}
+for (i in 1:length(spcv_env_all_fit$.metrics)) {
+  rmse <- c(rmse,spcv_env_all_fit$.metrics[[i]]$.estimate[1])
+  rsq <- c(rsq,spcv_env_all_fit$.metrics[[i]]$.estimate[2])
+  set <- c(set,fold_info$fold_name[i])
+  sample_size <- c(sample_size,fold_info$sample_size[i])
+  species <- c(species,unlist(str_split(fold_name[i],' - '))[1])
+  locus <- c(locus,unlist(str_split(fold_name[i],' - '))[2])
+}
+model <- c(rep('env_only',length(spcv_env_fit$.metrics)),
+           rep('env_disp',length(spcv_env_disp_fit$.metrics)),
+           rep('env_lh',length(spcv_env_lh_fit$.metrics)),
+           rep('env_all',length(spcv_env_all_fit$.metrics)))
+
+spcv_metrics <- data.frame(model,set,sample_size,species,locus,rmse,rsq)
+```
+
+Collecting predictions for later interpolation:
+
+```{r}
+spcv_env_pred <- spcv_env_fit %>% collect_predictions() %>% arrange(.row) %>%
+  select(.pred) %>% unlist() %>% as.numeric()
+spcv_env_disp_pred <- spcv_env_disp_fit %>% collect_predictions() %>% arrange(.row) %>%
+  select(.pred) %>% unlist() %>% as.numeric()
+spcv_env_lh_pred <- spcv_env_lh_fit %>% collect_predictions() %>% arrange(.row) %>%
+  select(.pred) %>% unlist() %>% as.numeric()
+spcv_env_all_pred <- spcv_env_all_fit %>% collect_predictions() %>% arrange(.row) %>%
+  select(.pred) %>% unlist() %>% as.numeric()
+```
+
+Remove `sp_cv` models to free up memory:
+
+```{r}
+rm(spcv_env_fit)
+rm(spcv_env_disp_fit)
+rm(spcv_env_lh_fit)
+rm(spcv_env_all_fit)
+```
+
+Saving image:
+
+```{r}
+save.image('predGenDiff.RData')
+```
