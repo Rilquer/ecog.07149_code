@@ -16,7 +16,7 @@
 
 ## Data
 
-The empirical data for this manuscript comes from published studies on birds of the Atlantic Forest (AF) of South America. For each study, we summarized all sequences generated. The original list is available at (./qmd/data/afmtdna_orig`).
+The empirical data for this manuscript comes from published studies on birds of the Atlantic Forest (AF) of South America. For each study, we summarized all sequences generated. The original list is available at (./qmd/data/afmtdna_orig).
 
 [Setup](./qmd/0_setup.qmd)
 
