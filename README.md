@@ -22,10 +22,54 @@ The empirical data for this manuscript comes from published studies on birds of 
 
 The links below consist of a step-by-step tutorial for the analyses implemented in this manuscript. Original Quarto Markdown files can be downloaded from the `qmd` folder. Commented R scripts can be downloaded from the `R` folder.
 
-0.  [Setup](./qmd/0_setup.qmd)
 1.  [Loading and processing sequence data](./qmd/1_loading.qmd)
 2.  [Creating response variable](./qmd/2_response.qmd)
 3.  [Creating predictor variables](./qmd/3_predictors.qmd)
 4.  [Training Random Forest models](./qmd/4_training.qmd)
 5.  [Exploring model results and evaluation metrics](./qmd/5_results.qmd)
 6.  [Performing and mapping predictions genetic divergence](./qmd/6_predictions.qmd)
+
+## Setup
+
+The code below lists all the packages used for the manuscript and checks for those not installed. Each package will be attached later as need.
+
+```{r}
+packages <- c(# Data manipulation and visualization
+              'tidyverse', 'ggforce','viridis','scales','ggthemes','needs',
+              
+              
+              #spatial
+              'tidygeocoder','sf','raster','ggspatial','rnaturalearth',
+              'geosphere','rgbif','leaflet','htmlwidgets','stars',
+              'gdistance','gstat',
+              
+              
+              #popgen
+              'rentrez',
+              
+              #modeling
+              'ENMeval','tidymodels','vip','corrr')
+
+for (name in packages) {
+  bool <- require(name, character.only = TRUE)
+  if (bool==FALSE) {
+    install.packages(name, dependencies = TRUE)
+  }
+}
+
+# Priotitize dplyr over other packages with similar functions (mostly select() from raster)
+prioritize(dplyr)
+
+# Installing muscle
+if (!require("muscle", quietly = TRUE)) {
+  if (!require("BiocManager", quietly = TRUE))
+      install.packages("BiocManager")
+
+  BiocManager::install("muscle")
+}
+
+# Installing PopGenome
+if (!require("PopGenome", quietly = TRUE)) {
+  devtools::install_github("pievos101/PopGenome")
+}
+```
