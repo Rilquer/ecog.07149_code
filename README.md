@@ -1,4 +1,4 @@
-# [CODE] Investigating the relative role of dispersal and demographic traits in predictive phylogeography
+# Manuscript code - Investigating the relative role of dispersal and demographic traits in predictive phylogeography
 
 ------------------------------------------------------------------------
 
