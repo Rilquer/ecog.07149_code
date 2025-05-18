@@ -3,21 +3,15 @@
 ------------------------------------------------------------------------
 
 > Author: Rilquer Mascarenhas
->
+> 
 > Most recent update: 2025-05-17
+>
+> Available at [Ecography](https://doi.org/10.1111/ecog.07149)
+> 
+> To cite this code:
+> Rilquer Mascarenhas, Ana C. Carnaval. Investigating the relative role of dispersal and demographic traits in predictive phylogeography. [https://github.com/rilquer-mascarenhas/ecog.07149_code/]. [10.5281/zenodo.12209533](https://doi.org/10.5281/zenodo.12209533). 2024.
 
 ------------------------------------------------------------------------
-
-To cite this code:
-
-> Rilquer Mascarenhas, Ana C. Carnaval. Investigating the relative role of dispersal and demographic traits in predictive phylogeography. [https://github.com/connor-french/ecog.07149_code/]. [10.5281/zenodo.12209533](https://doi.org/10.5281/zenodo.12209533). 2024.
-
-Open access in Ecography:
-
-> Investigating the relative role of dispersal and demographic traits in predictive phylogeography
-> Rilquer Mascarenhas, Ana C Carnaval. Ecography (2024) e07149. doi: [10.1111/ecog.07149](https://doi.org/10.1111/ecog.07149)
-
-
 
 ## Data preparation
 
