@@ -5,91 +5,94 @@ format: html
 editor: visual
 ---
 
-> #### Summary
+> #### Steps
 >
-> -   
+> 1.1  Formatting genetic data
+> 1.2  Formatting geographic data
+> 1.3  Setting up for alignments
 >
-> ##### Data required
+> #### Packages utilized
 >
-> ##### Data generated
->
-> ##### Packages utilized
->
-> `raster`, `sf`, `ggplot2`, `dplyr,` `viridis`
+> `tidyverse`,`rentrez`,`parallel`,`tidygeocoder`,
+> `sf`,`raster`,`rnaturalearth`,`ggspatial`
 
 ------------------------------------------------------------------------
 
-Our first step is to read our initial dataset. This dataset contains one row per sequence generated in the original study. Columns include the accession number, specimen ID, the OTU name, the locality the specimen is from (along with longitude and latitude when available) and the locus.
+## 1.1 Formatting genetic data
 
-In the code below, we read our csv file and use function `str_trim` to remove whitespaces in the beginning and end of the text in each character column. We also change columns *longitude* and *latitude* to numeric.
+Our first step is to read the database summarizing the metadata for all sequences from published studies. Columns include the accession number, specimen ID, the OTU name, the locality the specimen is from (along with longitude and latitude when available) and the locus.
 
-```{r warning=FALSE, message=FALSE, results='hide'}
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
 library(tidyverse)
-afmtdna_org <- read_csv('data/af_mtdna_dataset_birds_Mar27-2023.csv') %>% 
+afmtdna_orig <- read_csv('data/afmtdna_preformat.csv') %>% 
+  # Removing any whitespaces at the beginning and end of character variables
   mutate_if(is.character, str_trim) %>%
+  # Making sure longitude and latitude are interpreted as numeric variables
   mutate_at(c('longitude','latitude'), as.numeric)
 ```
 
-We also assign one unique ID to each sequence in this dataset.
+We also assign one unique ID to each entry in this database.
 
-```{r warning=FALSE, message=FALSE, results='hide'}
-afmtdna_org <- bind_cols(id = paste0('AFMTDNA',seq(1:nrow(afmtdna_org))),afmtdna_org)
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
+afmtdna_orig <- afmtdna_orig %>%
+  add_column(id = paste0('AFMTDNA',seq(1:nrow(afmtdna_orig))),
+             .before = 'accession')
 ```
 
-### 2.1 Retrieve accession number
+### 1.1.1 Searching for missing accession numbers
 
-The first thing we will do with this dataset is attempt to complete the accession number information. Since we do not have that number for many sequences, but we do have other information such as species name, locus and voucher ID, we will use the packages `rentrez` to search the NCBI Nucleotide database and retrieve the accession number. This search is done before anything else because the results here will dictate how many sequences we will actually analyze later on.
+Our goal is to use the accession number in this database to retrieve the mtDNA sequence for each individual from the NCBI Nucleotide database. Since not all entries in this database have the information about the accession number, we will first retrieve that number based on the information that we do have for each sample. Using the package `rentrez`, we can search the NCBI Nucleotide database utilizing information such as the species name, locus and voucher ID.
 
-We star by creating a `ncbi_summary` list object with length equal to number of sequences in `afmtdna_org`. We will perform searches only for those sequences without an accession number in the database, and save the search result only when we found one unique match for the sequence. This means `ncbi_summary` follows `afmtdna_org` index, and `ncbi_summary[[i]]` will be null when 1) the sequence already has accession info in `afmtdna_org`; or 2) when it was searched but not found.
+We will use function `mc.lapply()` from the `parallel` package to perform an automatic search through all entries in our database; if the accession number is missing for an entry, we will search the database based on the existing information and return the results of the search. The results will be saved in a list named `ncbi_summary`, with length equal to number of sequences in `afmtdna_orig`. 
 
-Vector `notfound` will store index for sequences that were searched but not found. Vector `dup_search` will store index for sequences that were searched but returned more than one match.
+Since the search is performed only for entries without an accession number in the database, and null results can be returned if no match is found based on the existing info, this means that items in `ncbi_summary` will be null when 1) the sequence already has accession info in `afmtdna_orig`; or 2) when it was searched but not found. We will keep check of the index of sequences that were searched but not found (saved to vector `notfound`) and the index of sequences for which searches returned more than one match (saved to `dup_search`).
 
-First we load the package and make our empty objects.
+This search is the first filter of our original database: any sequences for which one (and only one) accession number is not found will be removed from further analyzes.
 
-```{r}
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
 library(rentrez)
-ncbi_summary <- vector('list',length = nrow(afmtdna_org))
-notfound <- c()
-dup_search <- c()
-```
+library(parallel)
 
-Now we make a loop to search in all rows of `afmtdna_org`.
+ncores <- (detectCores()-2) # Retrieving number of available cores
 
-```{r}
-for (i in 2396:nrow(afmtdna_org)) {
-  if (is.na(afmtdna_org$accession[i])) {
-    #index <- c(index,i)
+# We use `apply` along with the `as.list` function to create a list on which
+# `mclapply` is executed. Each item in this list is one entry in our database
+ncbi_summary <- mclapply(apply(afmtdna_orig,1,as.list),function(data) {
+  if (is.na(data$accession)) {
     
     #First, we retrieve and format the info we need to do the search.
-    if (is.na(afmtdna_org$species[i])) {
-      species <- ''
-    } else {
-      species <- afmtdna_org$species[i]
-    }
-    sp <- trimws(paste0(afmtdna_org$genus[i],' ',species), 'both')
-    museum <- afmtdna_org$museum_code[i]
-    specimen_id <- afmtdna_org$specimen_id[i]
-    specimen_id_original <- afmtdna_org$specimen_id_original[i]
-    locus <- afmtdna_org$locus[i]
     
-    # Note that before every search a check for locus is made. If it is CR,
+    # Checking for OTUs without the specific epithet
+    if (is.na(data$species)) {
+      species <- '' 
+    } else {
+      species <- data$species
+    }
+    # Merging with genus and trimming whitespaces
+    sp <- paste0(data$genus,' ',species) %>% str_trim(side='both')
+    
+    museum <- data$museum_code
+    specimen_id <- data$specimen_id
+    specimen_id_original <- data$specimen_id_original
+    locus <- data$locus
+    
+    # Now, we will create a search term to use with function `entrez_search` from
+    # the `rentrez` package, which will perform searches on the NCBI database.
+    # Note: for each entry, we first check what is the locus. If it is Control Region (CR),
     # we create a search term that includes the possibility that the sequence
     # was published in genbank as d-loop or as control region (i.e., we use the 
     # OR operator)
     
-    # Now, we perform searches on the NCBI database
     if(is.na(museum)) {
       # When there is no museum data, we fist check if there is a specimen_ID
       if (is.na(specimen_id)) {
         # If there isn't, we use specimen_id_original, along with species and locus
-        message('Specimen ',i,': ID ',specimen_id_original,' ',sp,' - ',locus)
         if (locus == 'cr') {
           ncbiterm <- paste0('(',sp,' AND d-loop AND ',specimen_id_original,') OR (',
                              sp,' AND control region AND ',specimen_id_original,')')
         } else {
           ncbiterm <- paste0(sp,' AND ',locus,' AND ',specimen_id_original)
         }
-        search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
       } else {
         # If there is, we use specimen_id along with name and locus
         message('Specimen ',i,': ID ',specimen_id,' ',sp,' - ',locus)
@@ -99,13 +102,14 @@ for (i in 2396:nrow(afmtdna_org)) {
         } else {
           ncbiterm <- paste0(sp,' AND ',locus,' AND ',specimen_id)
         }
-        search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
       }
+      search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
+      # Without museum data, there is not many extra bits of info we can use, so we end here
+      # and we'll check later for non-successful searches.
     } else {
       # When there is museum data, we use that data with specimen ID (in addition to species
-      # and locus). Specimen ID original, in this case, is always either absent or the same
+      # and locus). In these cases, Specimen ID original is always either absent or the same
       # as museum + specimen ID, so we don't usually need to worry about it here.
-      message('Specimen ',i,': ID ',paste0(museum,specimen_id),' ',sp,' - ',locus)
       if (locus == 'cr') {
         ncbiterm <- paste0('(',sp,' AND d-loop AND ',museum,specimen_id,') OR (',
                            sp,' AND control region AND ',museum,specimen_id,')')
@@ -114,8 +118,11 @@ for (i in 2396:nrow(afmtdna_org)) {
       }
       search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
       
+      # Here, we may have non-successful searchers because there are many ways
+      # in which researchers may have entered museum voucher info in NCBI. So
+      # we will try a couple extra combinations for the search term.
       if (search$count == 0) {
-        # If search count = 0, let's try with a space between museum and specimen ID
+        # Let's try with a space between museum and specimen ID
         if (locus == 'cr') {
           ncbiterm <- paste0('(',sp,' AND d-loop AND ',museum,' ',specimen_id,') OR (',
                              sp,' AND control region AND ',museum,' ',specimen_id,')')
@@ -125,7 +132,7 @@ for (i in 2396:nrow(afmtdna_org)) {
         search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
         
         if (search$count == 0) {
-          #If search is still = 0, let's give it a try using only specimen ID
+          #If search is still empty, let's give it a try using only specimen ID
           if (locus == 'cr') {
             ncbiterm <- paste0('(',sp,' AND d-loop AND ',specimen_id,') OR (',
                                sp,' AND control region AND ',specimen_id,')')
@@ -134,8 +141,8 @@ for (i in 2396:nrow(afmtdna_org)) {
           }
           search <- entrez_search(db = 'nucleotide',term=ncbiterm, retmax = 10000)
           if (search$count == 0) {
-            # If still 0, make a final attempt using specimen_id_original (just to cover
-            # all our bases)
+            # If still empty, make a final attempt using specimen_id_original
+            # (just making sure we covered all possibilities)
             if (locus == 'cr') {
               ncbiterm <- paste0('(',sp,' AND d-loop AND ',specimen_id_original,') OR (',
                                  sp,' AND control region AND ',specimen_id_original,')')
@@ -151,218 +158,204 @@ for (i in 2396:nrow(afmtdna_org)) {
     # After out attemps, we will now check what is inside search object and proceed
     # accordingly
     if (search$count == 0) {
-      # If search count is still 0 after all attempxs, we inform no sequence was found.
-      # We also save the index of the sequence not found, for futher exploration.
-      message('No sequence found of gene ',locus,' for specimen ',specimen_id,' of ',sp)
-      notfound <- c(notfound,i)
+      # If search count is still 0 after all attempts, we return 'not_found'.
+      return('not_found')
     } else if (search$count == 1) {
       # If search count = 1, we got a match. Let's get info on that match so we can
       # explore further.
-      ncbi_summary[[i]] <- entrez_summary(db='nucleotide',id=search$ids)
+      return(entrez_summary(db='nucleotide',id=search$ids))
     } else {
-      # If search count > 1, we inform there is more than one sequency for that search.
-      # Then we save the index of the sequence that gave a duplicate search, for further
-      # exploration.
-      message('More than one sequence for this search')
-      dup_search <- c(dup_search,i)
+      # If search count > 1, we inform there is more than one sequenct for that search
+      # by returning 'dup_search'
+      return('dup_search')
     }
   }
-}
-save.image('predGenDiff.RData')
+  # If entry already has accession number, we return NULL
+  return(NULL)
+}, mc.cores = ncores)
+saveRDS(ncbi_summary,'RData/ncbi_summary.rds')
 ```
 
-Let's make some calculations to make sure we searched through the entire `afmtdna_org` database. Regarding the NCBI search, this number of sequences in the dataset should equal the sum of: 1) all sequences already with accession info; 2) all sequences that were searched and got one unique match; 3) all sequences that were searched but got no match; 4) all sequences that were searched and got more than one match.
+Let's make some calculations to make sure we searched through the entire `afmtdna_orig` database. Regarding the NCBI search, this number of sequences in the database should equal the sum of: 1) all sequences already with accession info; 2) all sequences that were searched and got one unique match; 3) all sequences that were searched but got no match; 4) all sequences that were searched and got more than one match.
 
-```{r}
+```{r warning=FALSE, message=FALSE, results='hide', eval = FALSE}
 # Number of sequences that already had accession (they were never searched)
-n_has_accession <- length(which(!is.na(afmtdna_org$accession)))
+# Note: this could also be retrieved by checking what items in the `ncbi_summary` are NULL,
+# but getting this value from the original database assures we don't get a incorrect
+# value due to any possible non-noticed errors in the `mclapply` code above. I.e., we
+# avoid working on the results from `mclapply` since that is the code we are trying
+# to doublecheck.
+n_has_accession <- length(which(!is.na(afmtdna_orig$accession)))
 
-# Number of non-null items in ncbi_summary (they were searched and found)
-found_index <- which(sapply(ncbi_summary,is.null)==FALSE)
+
+# Number of items in ncbi_summary that ARE NOT 'not_found' or 'dup_search'
+# and ALSO not null (i.e., they were searched and found)
+# We first get the index of those entries since we will
+# use it later on.
+found_index <- which(sapply(ncbi_summary,function(x){
+  (!(x %in% c('not_found','dup_searc'))) & (!(is.null(x)))
+  }))
 n_found <- length(found_index)
 
-# Number of sequences searched but not found
-n_notfound <- length(notfound)
+# Number of items in ncbi_summary that returned 'not_found'
+# We keep the index for later use
+not_found <- which(sapply(ncbi_summary,function(x){x == 'not_found'}))
+n_notfound <- length(not_found)
 
-# Number of sequences searched that returned more than one hit
+# Number of items in ncbi_summary that returned 'dup_search'
+# (i.e. duplicate hits)
+# We keep the index for late ruse
+dup_search <- which(sapply(ncbi_summary,function(x){x == 'dup_search'}))
 n_dup <- length(dup_search)
 
 # Checking if the sum of the above is equal to total number of sequences (it should)
-nrow(afmtdna_org) == n_found + n_has_accession + n_notfound + n_dup
+nrow(afmtdna_orig) == n_found + n_has_accession + n_notfound + n_dup
 ```
 
-Now we go through object `ncbi_summary` to validate that the search results seem correct. We base ourselves on the title slot.
+Now we go through object `ncbi_summary` to validate that the search results seem correct. We base ourselves on the title slot returned in the search. We create a dataframe with the original data used for searching and add the title that was found, saving it to an external file which we will manually check to assure we retrieved the correct accession numbers.
 
 ```{r}
-found_title <- c()
-for (i in found_index) {
-  found_title <- c(found_title,ncbi_summary[[i]]$title)
-}
+found_title <- sapply(found_index,function(i,data=ncbi_summary){return(data[[i]]$title)})
 
-ncbi_check <- afmtdna_org %>% slice(found_index) %>%
+# Getting original info and adding the title found through NCBI search
+ncbi_check <- afmtdna_orig %>% slice(found_index) %>%
   select(id,museum_code,specimen_id,specimen_id_original,genus,species,subspecies,locus) %>% 
   mutate(found_title = found_title)
-dir.create('data/checking/')
-write.csv(ncbi_check,'data/checking/ncbi_check.csv',row.names = F)
+
+# Exporting
+write.csv(ncbi_check,'data/checking/ncbi_searches/ncbi_check.csv',row.names = F)
 ```
 
-Only one sample of *T. caerulescens* had a weird result: specimen MZUSP FRA 258 (AFMTDNA324) returned *T. caerulescens* MZUSP 81155 in NCBI. The correct accession number for this specimen (by searching manually on NCBI) is MT079233. We will use the specimen id original to retrieve the index for that specimen and manually add the NCBI summary to `ncbi_summary`.
+After manual check, we see that only one sample of *T. caerulescens* has an unexpected result: specimen MZUSP FRA 258 (AFMTDNA324) returned *T. caerulescens* MZUSP 81155 in NCBI. The correct accession number for this specimen (after searching manually on NCBI) is MT079233. We will use the specimen id original to retrieve the index for that specimen and manually add the NCBI summary to `ncbi_summary`.
 
-> We avoid using the index `324` or the id `AFMTDNA324` because these may change if the dataset is modified.
+> We avoid using the index `324` or the id `AFMTDNA324` because these may change if the database is modified.
 
 ```{r}
-ncbi_summary[[which(afmtdna_org$specimen_id_original=='MZUSPFRA258')]] <- entrez_summary(db = 'nucleotide',id='MT079233')
+ncbi_summary[[which(afmtdna_orig$specimen_id_original=='MZUSPFRA258')]] <- entrez_summary(db = 'nucleotide',id='MT079233')
 ```
 
-Now we just need to deal with those searches that were not found and those that returned duplicated matches.
+### 1.1.2 Manual search of accession numbers
+
+Now we just need to deal with those searches that were not found and those that returned duplicated matches. We will export the information of the entries that resulted in those non-succesful searches, and use that information to manually search for these sequences in the NCBI database. This manual search will assure that these not-so-obvious searches will be matched to the correct sequence utilized in the original manuscripts.
 
 ```{r}
-## Add here column to explain why it needed manual search
-ncbi_manual_search <- afmtdna_org %>%
+afmtdna_orig %>%
   slice(c(notfound,dup_search)) %>%
   select(id, museum_code, specimen_id, specimen_id_original, genus, species,
          subspecies, locus) %>% 
   mutate(issue = c(rep('not_found',length(notfound)),
                    rep('duplicate',length(dup_search)))) %>% 
-  arrange(id)
+  arrange(id) %>%
+  write.csv('data/checking/ncbi_searches/ncbi_manual_search.csv',row.names = F)
 ```
 
-> Quick recap: the total number of sequences in the `ncbi_manual_search` dataframe is 642. The remaining sequences don't need to go through manual search, since they comprise all that already had accession and didn't go through any search in the first place (579) and those that went through search and were found to be right (1258). The sum of these amounts equals 2479 (total number of sequences in `afmtdna_org`).
+> Quick recap: the total number of sequences exported for manual search is 642. The remaining sequences don't need to go through manual search, since they comprise all that already had accession and didn't go through any search in the first place (579) and those that went through search and were found to be right (1258). The sum of these equals 2479 (total number of sequences in `afmtdna_orig`).
 
-Let's export that dataframe and use it for manual search in NCBI.
+Below is a report of our results after manual search. The accession numbers retrieved from this manual search can be found at `data/checking/ncbi_new_accession.csv`.
 
-```{r}
-write.csv(ncbi_manual_search,'data/checking/ncbi_manual_search.csv',row.names = F)
-```
-
-> Species that were in the manual search table:
+> -   *Myrmeciza* genus - most of the missing sequences were found.
 >
-> -   *Myrmeciza* genus - found most of the missing sequences
+> -   *Pyriglena* genus - data is not available on GenBank, so this species will be **removed** from further analyzes.
 >
-> -   *Pyriglena* genus - data is not available on GenBank. **Remove.**
->
-> -   *Schiffornis virescens* and *Conopophaga lineata* had few non found sequences. I could find some.
+> -   *Schiffornis virescens* and *Conopophaga lineata* had few non found sequences, most of which were found mannualy.
 >
 > -   *Hemitriccus diops* - four samples from Santa Bárbara/MG were not found (from MCNA PUC Minas).
 >
-> -   Species from Bocalini's paper (*Picumnus exilis*, *Platyrinchus mystaceus*, *Tangara cyanocephala*, *Thalurania glaucopis/wattertoni* and *Phaethornis margarettae*) were mostly not found due to typos or synonyms problems. *Phaethornis margarettae* from PE and MA were in GenBank as *P. malaris*.
+> -   Entries for OTUs from Bocalini's paper (*Picumnus exilis*, *Platyrinchus mystaceus*, *Tangara cyanocephala*, *Thalurania glaucopis/wattertoni* and *Phaethornis margarettae*) were mostly not found due to typos or synonyms problems. *Phaethornis margarettae* from PE and MA were in GenBank as *P. malaris*.
 >
-> -   *Thamnophilus caerulescens* had some typos or space issues that could be fixed. Others were not found.
+> -   Entries for *Thamnophilus caerulescens* had some typos or space issues, which were fixed. A couple other sequences were not found.
 >
-> -   *Scytalopus speluncae* had three samples without accession number in the manuscript and also not found online.
+> -   Three entries for *Scytalopus speluncae* had no accession number in the manuscript and were not found online.
 >
-> -   *Rhopias gularis, Trichothraupis melanops, Pseudopipra pipra, Conopophaga melanops* - some samples not sequenced for some loci.
+> -   The following OTUs exhibited different samples sequenced for different loci, which led to some non-successful searches: *Rhopias gularis, Trichothraupis melanops, Pseudopipra pipra, Conopophaga melanops*. The data was corrected accordingly.
 >
-> -   Genus *Synallaxis* - Many samples were found and quite a few were also not found. I could retrieve MCP3088 for both cytb and nd2. The popsets Henrique sent me for the Heredity paper had [88 sequences for cytb](https://www.ncbi.nlm.nih.gov/popset/1679374130) and [85 sequences for ND2](https://www.ncbi.nlm.nih.gov/popset/1679374306) which is similar to the amount we found. Our dataset has 109 sequences for both loci, and the extra samples were from the MPE paper. We could not find them right now probably because the MPE samples are on genbank with lab code ([cytb](https://www.ncbi.nlm.nih.gov/popset/444230238) and [nd2](https://www.ncbi.nlm.nih.gov/popset/444230355)) and not museum code, but they are in my dataset as museum codes, which I got from the heredity paper. To solve, I manually got the accession numbers from the MPE paper Table 1, following the museum code I already had.
+> -   Genus *Synallaxis* - The dataset for this genus comes from two different manuscripts: [Batalha-Filho et al. 2013](https://doi.org/10.1016/j.ympev.2013.01.007), which explores the evolution of the *S. ruficapilla* complex, and [Batalha-Filho et al. 2019](https://doi.org/10.1038/s41437-019-0234-y), which explores the hybrid zone between *S. ruficapilla* and *S. cinerea*. Most entries were found, and double checked with the popsets sent to us by the authors for the 2019 manuscript, containing [88 sequences for cytb](https://www.ncbi.nlm.nih.gov/popset/1679374130) and [85 sequences for ND2](https://www.ncbi.nlm.nih.gov/popset/1679374306). Our original dataset contains 109 sequences for each locus; the extra sequences comes from the 2013 manuscript. Many of those were not found because they were deposited on NCBI with a wet lab sample code ([cytb](https://www.ncbi.nlm.nih.gov/popset/444230238) and [nd2](https://www.ncbi.nlm.nih.gov/popset/444230355)) intead of the museum code (which is the info we have in our dataset). I mannualy got the accession number from the 2013 manuscript following Table 1 and the museum code present in our dataset.
 
-After our manual search, we will add the accession numbers we found:
+### 1.1.3 Creating final database
+
+Now that we have all the accession numbers we could find from both automatic and manual search, we will add this information to our database. We create a duplicate of this database in order to keep the original information (i.e. prior to NCBI searches) intact, in case we need to doublecheck any original information.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
 # Replacing object
-ncbi_manual_search <- read_csv('data/checking/ncbi_manual_search_new_accession.csv')
-
-for (i in 1:nrow(afmtdna_org)) {
-  row <- which(ncbi_manual_search$id==afmtdna_org$id[i])
-  
-  # afmtdna ID may not be on ncbi_manual_search
-  if (length(row)!=0) { 
-    
-    # Even if it is, maybe we couldn't find the accesion
-    if (!(is.na(ncbi_manual_search$new_accession[row]))) { 
-      afmtdna_org$accession[i] <- ncbi_manual_search$new_accession[row]
-    }
-  }
-}
+afmtdna <- read_csv('data/checking/ncbi_searches/ncbi_new_accession.csv') %>%
+  select(id,new_accession) %>%
+  right_join(afmtdna_orig,by='id') %>%
+  mutate(accession = case_when(is.na(accession) ~ new_accession,
+                               .default = accession)) %>%
+  select(-new_accession)
 ```
 
-Now, iterate through `afmtdna_org` to see what sequences don't have accession yet. Those correspond to sequences that were searched in ncbi, had 1 match and we didn't think they need further check.
+The object `afmtdna` now has all entries in our database and the accession number was updated for those found through manual search. Now let's do the same for the accession numbers found through the automatic search, retrieving that information from `ncbi_summary`.
 
-```{r}
-for (i in 1:nrow(afmtdna_org)) {
-  if ((is.na(afmtdna_org$accession[i]))) {
+Now, iterate through `afmtdna_orig` to see what sequences don't have accession yet. Those correspond to sequences that were searched in ncbi, had 1 match and we didn't think they need further check.
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+for (i in 1:nrow(afmtdna)) {
+  # Any missing accession number in afmtdna is now from those entries with a
+  # successful search in NCBI.
+  if ((is.na(afmtdna$accession[i]))) { 
     if (!(is.null(ncbi_summary[[i]]))) {
-      afmtdna_org$accession[i] <- ncbi_summary[[i]]$caption
+      afmtdna$accession[i] <- ncbi_summary[[i]]$caption
     }
   }
 }
 ```
 
-Now, all sequences in our dataset that have accession number correspond to: 1) sequences that already had it in the first place; 2) sequences that were searched and found; 3) sequences that were searched, not found and we added manually. Those without an accession number are sequences that we couldn't find automatically or manually. We want to remove those.
+Now, all sequences in our dataset that have accession number correspond to: 1) sequences that already had it in the first place; 2) sequences that were automatically searched and returned a single match; 3) sequences that were searched but not found and were then searched manually. Those without an accession number are sequences that we couldn't find through either automatic or manual searches, so we remove those.
 
-> Here is where I probably lost *Phaethornis*. I don't think I should have cause I added their accession number. But oh well...
-
-```{r}
-afmtdna_org <- afmtdna_org %>% filter((!(is.na(accession))))
+```{r warning=FALSE, message=FALSE, results='hide'}
+afmtdna <- afmtdna %>% filter((!(is.na(accession))))
 ```
 
-Now let's check how many sequences we have per OTU. We also want to remove those OTUs with two few sequences (maybe one or two individuals had the accession number, but that won't be enough for a landscape genetics analysis).
+We will also check for sample size per OTU to make decisions on filtering out those with low sample size. In some cases, maybe only one or two individuals had an accession number, which won't be enough for our analyzes.
 
-```{r}
-spp <- sort(unique(afmtdna_org$otu))
-sample_size <- c()
-data_per_spp <- vector('list',length = length(spp))
-for (i in 1:length(spp)) {
-  data_per_spp[[i]] <- afmtdna_org %>% filter(otu == spp[i])
-  sample_size <- c(sample_size,nrow(data_per_spp[[i]]))
-}
-sample_size <- data.frame(spp,sample_size) %>% arrange(desc(sample_size))
-  #mutate(spp = fct_reorder(spp, desc(sample_size)))
-```
-
-Plotting OTU per sample size:
-
-```{r}
-library(ggplot2)
-ggplot(sample_size,aes(x = spp,y=sample_size))+geom_bar(stat = 'identity')+
+```{r warning=FALSE, message=FALSE, results='hide'}
+afmtdna %>% count(otu) %>% arrange(desc(sample_size)) %>%
+  ggplot(aes(x = otu,y=n))+geom_bar(stat = 'identity')+
   theme(axis.text.x = element_text(angle = 70, hjust = 1))
 ```
 
-For now, we will remove the genus *Pyriglena*, because we know we were supposed to: we could not find the data on NCBI, so the 11 sequences we have definitely do not cover the entire distribution of the two species in this genus we were interested in. We will keep all other species with lower sample size than *Pyriglena* (*Phylloscarte ventralis*, *Eleoscytalopus indigoticus*, *Hemithraupis flavicollis* and *Poecilotriccus plumbeiceps*), cause we would like to use them to train our model and still see how well the model performs with species with low sample size and different sampling efficiency.
+Some species do have small sample size, due to either narrow distribution (such as *Eleoscytalopus indigoticus*) or simply poor sampling over their geographic range (such as *Phylloscarte ventralis*, *Hemithraupis flavicollis* and *Poecilotriccus plumbeiceps*). They still have enough samples per locality to calculate metrics of diversity and differentiation, so we choose to keep these species. Following the manual search reported described above, we will remove the genus *Pyriglena*.
 
-> *E. indigoticus* is narrowly distributed, whereas the other three species are widely distributed, but are poorly sampled.
-
-```{r}
-remove <- c('Pyriglena')
-afmtdna <- afmtdna_org %>% filter((!(otu %in% remove)))
+```{r warning=FALSE, message=FALSE, results='hide'}
+afmtdna <- afmtdna %>% filter(otu != 'Pyriglena')
 ```
 
-We ended up with 1883 sequences, all of them with acession numbers. Now we can retrieve their fasta sequences using `rentrez` package. We first create a new object called `ncbi_info`, similar to `ncbi_summary`, but now with info only for the sequences that we ended up keeping, as well as an object called `fasta_set`.
+Finally, we will check loci representation across species, to visualize if we need or can remove any OTU or locus.
 
 ```{r}
-ncbi_info <- vector(mode = 'list',length=nrow(afmtdna))
-fasta_set <- vector(mode = 'list',length=nrow(afmtdna))
+afmtdna %>% distinct(otu,locus) %>% mutate(presence='1') %>% 
+  mutate(otu = fct_reorder(otu, desc(otu))) %>% 
+  ggplot(aes(x = locus, y = otu)) + 
+  geom_point(aes(fill=presence))+
+  theme_bw()+
+  theme(legend.position = 'none')
 ```
 
-Now we retrieve:
+We can see that, in most cases, for each OTUs we have only one locus. CytB and ND2 were the most popular choices, and studies have mostly sequenced either one of them. Few studies have sequenced both (*Synallaxis*, *Sclerurus*, *Rhopias* and *Xiphorhynchus*). The Control Region (CR) is also unique in most cases: few OTUs have it, but in those OTUs CR is the only locus representing their mitochondrial history. ND3 is the only redundant locus: everytime an OTU was sequenced for ND3, it was also sequenced for at least one other mtDNA locus. We will choose to keep CR, CytB and ND2, in order to not lose info on any OTU, but remove ND3 datasets.
 
 ```{r}
-for (i in 1:nrow(afmtdna)) {
-  message('Retrieving sequence AFMTDNA',i)
-  ncbi_info[[i]] <- entrez_summary(db='nucleotide',id=afmtdna$accession[i])
-  fasta_set[[i]] <- entrez_fetch(db='nucleotide',id=afmtdna$accession[i],rettype = 'fasta')
-}
-fasta_set <- unlist(sapply(fasta_set,str_remove,".*\n")) # Removing first line with name
-fasta_set <- str_remove_all(fasta_set,'\n') # Removing all \n
-heterozygous <- c('R','Y','S','W','K','M','B','D','H','V')
+afmtdna <- afmtdna %>% filter(locus != 'nd3')
 ```
 
-Now we add to `afmtdna`:
+### 1.1.4 Retrieving fasta sequences
 
-```{r}
-afmtdna <- afmtdna %>% mutate(fasta = fasta_set)
+We ended up with 1801 sequences, all of them with accession numbers. Now we can retrieve their fasta sequences using the `rentrez` package.
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+afmtdna <- afmtdna %>%
+  mutate(fasta = entrez_fetch(db='nucleotide',id=accession,rettype = 'fasta')) %>%
+  mutate(fasta = unlist(sapply(fasta,str_remove,".*\n"))) %>% # Removing first line with name
+  mutate(fasta = str_remove_all(fasta,'\n')) # Removing all \n
 ```
 
-Save image:
+## 1.2 Formatting geographic data
 
-```{r}
-save.image('predGenDiff.RData')
-```
+### 1.2.1 Searching for mising coordinates
 
-### 2.2 Geocoding
+This dataset is complete for most of the basic info we need: OTU name, locality, locus, and now accession numbers. One important info for our spatial analyzes is not complete, though: the coordinates for of the sequences (we have for some, but not all of of them). Our next step will be to retrieve that information based on the info we have in our dataset.
 
-This dataset is complete for most of the basic info we need: OTU name, locality, locus, and now accession numbers. One important info for our spatial analyses is not complete, though: the coordinates for of the sequences (we have for some, but not all of of them). Our next step will be to retrieve that information based on the info we have in our dataset.
-
-To infer the missing coordinates, we will use package `tidygeocoder`. First, let's create one column merging info from columns **locality**, **province** and **country**. To do that, we initially check columns *province* and *country* for `NA`values and change those to an empty string value (to avoid the word NA in the merged column). Then, we paste values from the three columns together and apply function `str_trim`.
+To infer the missing coordinates, we will use the package `tidygeocoder`. First, let's create one column merging info from columns **locality**, **province** and **country**. To do that, we initially check columns *province* and *country* for `NA`values and change those to an empty string value (to avoid the word NA in the merged column). Then, we paste values from the three columns together and apply function `str_trim`.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
 afmtdna <- afmtdna %>%
@@ -378,7 +371,7 @@ locdata <- afmtdna %>%
   dplyr::select(c(locality,province,country,full_loc,longitude,latitude))
 ```
 
-Now we are going to use function `geocode` and test two different geocoding servers: *arcgis* and *google*. We will use test using just the info from column **locality** only, as well as the info from the new column created merging **locality, province** and **country**.
+Now we are going to use function `geocode` and test two different geocoding servers: *arcgis* and *google*. We will test using just the info from column **locality** only, as well as the info from the new column created merging **locality, province** and **country**.
 
 ```{r}
 library(tidygeocoder)
@@ -390,8 +383,11 @@ locdata <-
           lat = 'lat_full_loc_arcgis',
           long = 'long_full_loc_arcgis') %>%
   
-  # Notice that to use Google API, you need to firsxt set your API key
+  # Note: to use Google API, you need to first set your API key
   # in the .Renviron file.
+  #Check:
+  #https://jessecambon.github.io/2021/01/18/tidygeocoder-1-0-2.html
+  #https://developers.google.com/maps/documentation/javascript/geocoding
   geocode(address = locality, method = 'google',
           lat = 'lat_loc_google',
           long = 'long_loc_google') %>% 
@@ -415,9 +411,9 @@ coord_check <-
   # accuracy check
   filter(locdata,!(is.na(latitude))) %>%
   
-  # Filtering out records where tidygeocoder could not find coordinates in
-  # any method
-  filter(!is.na(lat_loc_arcgis) | !is.na(lat_full_loc_arcgis) | !is.na(lat_loc_google) | !is.na(lat_full_loc_google)) %>%
+  # Dropping remaining NA values to filter out records where tidygeocoder
+  # could not find coordinates in any method
+  drop_na() %>% 
   
   # Calculating difference btw actual and predicted coordinates
   mutate(latlarcdiff = abs(latitude-lat_loc_arcgis),
@@ -457,30 +453,26 @@ accuracy <- tibble(approach = c('ArcGis with locality - latitude',
 accuracy
 ```
 
-Using Google API with full locality seems to give the best geocoding, considering the data we have. So we will use keep those coordinates for sequences without coordinates.
+Using Google API with full locality seems to give the best geocoding, considering the data we have. So we will keep those coordinates for sequences without coordinates.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
-# Creating new columns named original long and original lat so we can keep
-# original coordinates, if needed in the future.
 afmtdna <- afmtdna %>%
+  # Creating new columns named original long and original lat so we can keep
+  # original coordinates, if needed in the future.
   mutate(org_long = longitude) %>%
-  mutate(org_lat = latitude)
-
-for (i in 1:nrow(afmtdna)) {
-  if (is.na(afmtdna$latitude[i])) {
-    afmtdna$longitude[i] <- locdata$long_full_loc_google[i]
-    afmtdna$latitude[i] <- locdata$lat_full_loc_google[i]
-  }
-}
+  mutate(org_lat = latitude) %>%
+  add_column(longitude = locdata$long_full_loc_google[i],
+             latitude = locdata$lat_full_loc_google[i])
 ```
 
 Now we want to check if there are localities that were not geocoded at all, so we can search for them manually.
 
 ```{r}
 length(which(is.na(afmtdna$latitude)))
+length(which(is.na(afmtdna$longitude)))
 ```
 
-From this result, we can see all localities were geocoded. Now we can ask two final summary questions: 1) how many total unique localities we have in our dataset?; 2) what is the proportion of those unique localities that did not have coordinates given in the original study and had to be geocoded using `tidygeocoder` and google?
+From this result, we can see all localities were geocoded. Now we can ask two final summary questions: 1) how many total unique localities we have in our dataset?; 2) what is the proportion of those unique localities that were obtained through `tidygeocoder` and google?
 
 To answer question 1, we will create a data.frame of unique localities, keeping only *full_loc* and coordinates info (we will use it to make a map later on).
 
@@ -501,17 +493,18 @@ To answer question 2, we will calculate the proportion of localities in this dat
 
 We can see that we had to geocode 199 (37.5%) of localities we have in our dataset.
 
-Now we can move to visualize them on a map and check everything is okay.
+Now we can move to doublecheck their geographic distribution.
 
-### 2.3 Creating shapefiles for maps
+### 1.2.2 Creating shapefiles for maps
 
-We will create two types of maps to check the localities of our data. Our first map will be a basic plot of all localities. The second type will be interactive maps for each OTU to visually check for the coordinates and make a final check of whether 1) they are falling within the domains of the AF or near it; and 2) the overall region makes sense considering what we know of localities and states in the country.
+We will create two types of maps to check the localities of our data. Our first map will be a basic plot of all localities. The second type will be interactive maps for each OTU to visually check the results from `tidygeocoder` and make a final check of whether 1) they are falling within the domains of the AF or near it; and 2) the overall region makes sense considering what we know of localities and states in the country.
 
 Before starting, we will go over some code to read and modify some shapefiles in order to create polygons of interest of our study. Here, we will be 1) using a shapefile of the world ecoregions to create a shapefile of the AF and associated forested areas; 2) using a shapefile of rivers in Brazil to filter out a few important rivers in the AF; 3) Create a shapefile for the Serra do Mar mountain range (another important topographic feature in the AF) from an elevation raster.
 
 First, we we will load the `sf` package and create a vector for our study area and a vector for the overall projection we will use for all spatial visualization and analyzes.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
+library(sf)
 study_area <- c(-60.94043,-33.21999,-33.98999,-1.12)
 study_crs <- "+proj=longlat +datum=WGS84 +no_defs"
 ```
@@ -519,17 +512,19 @@ study_crs <- "+proj=longlat +datum=WGS84 +no_defs"
 The code block below creates our AF shapefile. We read the shapefile of terrestrial ecorregions, downloaded from [The Nature Conservancy](https://geospatial.tnc.org/datasets/7b7fb9d945544d41b3e7a91494c42930_0/explore?location=-0.273770%2C0.000000%2C3.00) website, and filter out only the ecorregions we want. We decided to make this shapefile based on a [broader definition of the AF](https://onlinelibrary.wiley.com/doi/full/10.1111/j.1365-2699.2007.01870.x), since many of the organisms in our dataset considered to be AF species also occur in areas outside of the narrower defintion of the biome.
 
 ```{r warning=FALSE, message=FALSE}
-# Creating AF Shapefile
-af_shapefile <- st_read('data/spatial/vector/terr-ecoregions-TNC/tnc_terr_ecoregions.shp')
-af_shapefile <- st_transform(af_shapefile,study_crs)
+# Name of ecoregions we want to keep for the AF shapefile
 eco_names <- c("Alto Paraná Atlantic Forests","Araucaria Moist Forests",
                "Bahia Coastal Forests","Bahia Interior Forests",
                "Caatinga Enclaves Moist Forests","Pernambuco Coastal Forests",
                "Pernambuco Interior Forests","Serra Do Mar Coastal Forests",
                "Atlantic Dry Forests")
 
-af_shapefile <- af_shapefile %>% filter(ECO_NAME %in% eco_names) %>% st_union()
-ggplot(af_shapefile)+geom_sf()
+af_shapefile <- st_read('data/spatial/vector/terr-ecoregions-TNC/tnc_terr_ecoregions.shp') %>%
+  st_transform(study_crs) %>%
+  filter(ECO_NAME %in% eco_names) %>% st_union()
+
+# Plotting for check
+ggplot(data=af_shapefile)+geom_sf()
 ```
 
 Now let's create a folder for our new `af_shapefile`.
@@ -547,21 +542,19 @@ write_sf(af_shapefile,'data/spatial/vector/af_shapefile/af_shapefile.shp')
 The code below reads a shapefile for South America countries and sets its projection.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
-samer <- read_sf('data/spatial/vector/samer/samer.shp')
-st_crs(samer) <- study_crs
-samer <- st_transform(samer)
+samer <- read_sf('data/spatial/vector/samer/samer.shp') %>%
+  st_transform(study_crs)
 ```
 
 The code below reads a shapefile with rivers of Brazil and sets its projection
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
 # Creating rivers shapefile
-rivers <- read_sf('data/spatial/vector/Hidrografia/hidrografia.shp')
-st_crs(rivers) <- study_crs
-rivers <- st_transform(rivers)
+rivers <- read_sf('data/spatial/vector/Hidrografia/hidrografia.shp') %>% 
+  st_transform(study_crs)
 ```
 
-We want to filter out three major rivers in AF: Rio São Francisco, Rio Doce and Rio Paraíba do Sul. Because the encoding for this shapefile is not being read properly in R (i.e, portuguese characthers are not showing up properly), we will first replace one of the symbols in the encoding with the letter `í`, so we can find Rio Paraíba do Sul in the file, to filter it out.
+We want to filter out three major rivers in AF: São Francisco river, Doce river and Paraíba do Sul river. Because the encoding for this shapefile is not being read properly in R (i.e, portuguese characthers are not showing up properly), we will first replace one of the symbols in the encoding with the letter `í`, so we can find Rio Paraíba do Sul in the file, to filter it out.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
 rivers$NOME <- str_replace(rivers$NOME,'\xa1','í')
@@ -573,10 +566,10 @@ Now we can use function `grepl` with `filter` to get the rivers we want.
 rivers <- rivers %>% filter(grepl('Paraíba do Sul|Francisco|Rio Doce',NOME))
 ```
 
-Because some of the features associated with the names we filtered out fall out of the AF domain, we will manually remove some of those features, based on their coordinates. In the code below, we make a data frame of coordinates from the shapefile `rivers`. Then, we create a vector `rm_ft` with the index of features to be removed. Features are chosen based on 1) being west of longitude -50 (remove some rivers far from the AF that share the name of the rivers we are interested in); and 2) being west of longitude -42 and between latitudes -10 and -21 (removes most of the São Francisco river that is outside of the AF, and a little bit of the Rio Doce far from the coast).
+Because some of the features associated with the names we filtered out are located outside the AF domain, we will manually remove them based on their coordinates. In the code below, we make a data frame of coordinates from the shapefile `rivers`. Then, we create a vector `rm_ft` with the index of features to be removed. Features are chosen based on 1) being west of longitude -50 (remove some rivers far from the AF that share the name of the rivers we are interested in); and 2) being west of longitude -42 and between latitudes -10 and -21 (removes most of the São Francisco river that is outside of the AF, and some of the Doce river far from the coast).
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
-# Getting features for Rio São Francisco that are west of longitude -41
+# Getting features for São Francisco river that are west of longitude -41
 crd_rivers <- data.frame(st_coordinates(rivers))
 
 rm_ft <- crd_rivers$L1[which(crd_rivers$X <= -50)]
@@ -603,8 +596,9 @@ write_sf(af_rivers,'data/spatial/vector/af_rivers/af_rivers.shp')
 Let's move on to creating our final shapefile: a polygon delineating the Serra do Mar mountain range. We will make this shapefile based on an elevation raster in 2.5 min resolution, retrieved from the [WorldClim](https://www.worldclim.org/data/worldclim21.html) database. We first read the raster file and reclassify it to keep areas only above 900 meters (we assign `NA` to all other cells).
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
-elevation <- raster('data/spatial/raster/wc2.1_30s_elev/wc2.1_30s_elev.tif')
-elevation <- raster::reclassify(elevation,rcl = c(-Inf,900,NA,900,2666,1), byrow = TRUE)
+library(raster)
+elevation <- raster('data/spatial/raster/wc2.1_30s_elev/wc2.1_30s_elev.tif') %>%
+  raster::reclassify(rcl = c(-Inf,900,NA,900,2666,1), byrow = TRUE)
 ```
 
 Then we mask our raster based on our AF shapefile, and crop it to southern AF using a custom set of coordinates.
@@ -618,9 +612,10 @@ Finally, we use function `st_as_sf` to convert the elevation raster to a vector 
 
 ```{r warning=FALSE, message=FALSE}
 serradomar <- st_as_sf(stars::st_as_stars(elevation_south),as_points = FALSE,
-                      merge = TRUE)
-st_crs(serradomar) <- study_crs
+                      merge = TRUE) %>%
+  st_transform(study_crs)
 serradomar <- st_transform(serradomar)
+
 dir.create('data/spatial/vector/serra_do_mar/')
 write_sf(serradomar,'data/spatial/vector/serra_do_mar/serra_do_mar.shp')
 ggplot()+
@@ -629,9 +624,9 @@ ggplot()+
   geom_sf(data = serradomar, color = 'grey', alpha = 0.5)
 ```
 
-### 2.4 Visualizing localities in space
+### 1.2.3 Mapping localities
 
-We will now using `ggplot` to make a map of all localities. First, let's create a `response_variable` folder within `data`, to store any data or figures related to our response variable. We will also create a `figures` folder inside of it.
+We will now using `ggplot` to make a map of all localities. First, let's create a `response_variable` folder within `data`, to store any data or figures related to our response variable (including localities and future genetic metrics). We will also create a `figures` folder inside of it.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
 # Creating output folder and response_variable to store output data and figures
@@ -640,15 +635,16 @@ dir.create('data/response_variable/')
 dir.create('data/response_variable/figures/')
 ```
 
-Now let's use make our plot using the previous data.frame we created for unique localities.
+Now let's make our plot using the previous `data.frame` we created for unique localities.
 
 ```{r warning=FALSE, message=FALSE}
-
 # Retrieving natural earth data to serve as base for the map, using
 # rnaturalearth package
+library(rnaturalearth)
+library(ggspatial)
 world <- ne_countries(scale = "medium", returnclass = "sf")
 
-library(ggspatial)
+
 theme_set(theme_bw()) #Setting theme
 ggplot(data = world) +
   geom_sf(fill= "ghostwhite", size = 0.1)+
@@ -668,12 +664,12 @@ ggplot(data = world) +
   theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
         panel.background = element_rect(fill = "aliceblue"))
 
-ggsave('data/response_variable/figures/localities_map_bf_correction.tiff', width = 7, height = 9)
+ggsave('data/response_variable/figures/localities_maps/localities_map_bf_correction.png', width = 7, height = 9)
 ```
 
 From this map, we can see a few things;
 
-1.  There are many coordinates close to each other. This is a result of us plotting all OTUs together, with some of them being accurate coordinates retrieved from the original manuscript, which may be in some of them the exact sampling location and in others an approximation made by the authors. Additionally, we have several approximations made by us using the Google API geocoding service.
+1.  There are many coordinates close to each other. This is a result of us plotting all OTUs together, with some of them being accurate coordinates retrieved from the original manuscript. Those may be the exact sampling locality or an approximation made by the authors. Additionally, we have several approximations made by us using the Google API geocoding service.
 2.  Many coordinates fall somewhat outside of the AF.
 
 We will take a deeper look at coordinates for each OTU by creating interactive maps in `html` format using the `leaflet` package.
@@ -726,7 +722,7 @@ for (n in spp) {
 After analyzing all leaflet maps and checking for possibly wrong coordinates, we created a spreadsheet of a few sequences whose coordinates need to be corrected. Now, we load this spreadsheet into R and use it to modify the final coordinates in our object `afmtdna`.
 
 ```{r warning=FALSE, message=FALSE, results='hide'}
-loc_correction <- read_csv('data/checking/loc_for_correction.csv') %>% 
+loc_correction <- read_csv('data/checking/localities/loc_for_correction.csv') %>% 
   mutate_if(is.character, str_trim) %>%
   mutate_at(c('new_long','new_lat'), as.numeric)
 
@@ -764,19 +760,97 @@ ggplot(data = world) +
   theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
         panel.background = element_rect(fill = "aliceblue"))
 
-ggsave('data/response_variable/figures/localities_map_aft_correction.png', width = 7, height = 9, dpi = 1200)
-ggsave('data/response_variable/figures/localities_map_aft_correction.jpg', width = 7, height = 9,dpi = 1200)
+ggsave('data/response_variable/figures/localities_maps/localities_map_aft_correction.png', width = 7, height = 9, dpi = 1200)
 ```
 
-Also maps per species:
+Our `afmtdna` dataset now is completed corrected for both the genetic and geographic dataset we will utilize in further analyzes. We will save this dataset to a file:
 
 ```{r}
-spp <- sort(unique(afmtdna$otu))
+write_csv(afmtdna,'data/afmtdna_postformat.csv')
+```
 
-for (n in spp) {
-  filtered <- afmtdna %>% filter(otu == n) %>% 
-    dplyr::select(full_loc,longitude,latitude) %>% 
-    distinct(full_loc,.keep_all = TRUE)
+## 1.3 Setting up for alignments
+
+Now that we have all the genetic and geographic data correctly summarized, we can start preparing the data to extract pairwise measurements of genetic differentiation across localities. To that end, we need to alignment fasta information per locus for each OTU. Each combination of OTU and locus will therefore be one alignment with a set number of sequences and a set number of geographic localities. Here, we will organize the data for those alignments, which will be implemented in the next section before calculating our genetic differentiation. Since this metric is calculated per locality and required at least two sequences per locality, here we will organize the data for those alignments, visualize the number of localities in each alignment and make some decisions on the how we will group sequence into localities.
+
+First, we'll create a list in which each element will be a combination of OTU and locus. This will be the base structure for the genetic alignments of next section. We will also keep the genetic information in the `fasta` column and we will add to it the grouping of localities that will be the base to calculate all pairwise distances in this manuscript.
+
+```{r}
+
+# Creating a list with information on each OTU-LOCUS combination
+otu_locus <- afmtdna %>% distinct(otu,locus) %>% arrange(otu) %>% apply(1,as.list)
+
+# Saving a name for each OTU-LOCUS combination
+aln_names <- afmtdna %>% distinct(otu,locus) %>% arrange(otu) %>%
+  mutate(name = tolower(paste0(gsub(' ','_',otu),'_',locus))) %>%
+  select(name) %>% unlist() %>% as.character()
+  
+aln_info <- lapply(otu_locus,function(x){
+  afmtdna %>% filter((otu == x$otu) & (locus == x$locus)) %>% 
+      dplyr::select(id,accession,otu,locus,full_loc,longitude,latitude,fasta)
+})
+names(aln_info) <- aln_names
+```
+
+We then save each item in `aln_info` to an external file in which we will manually provide, in a new column, a grouping of specimens per localities Doing this manually will allow us to check for many details, such as highlight localities with small sample size, evaluate localities that are geographically close enough and could be merged to increase sample size, or the same locality with ambiguous spelling.
+
+```{r}
+dir.create('data/checking/aln_info/')
+lapply(aln_names,function(x){
+  write_csv(aln_info[[x]],paste0('data/checking/aln_info/',x,'.csv'))
+})
+```
+
+After manual check, files are then read back into `aln_info` and 
+
+```{r warning=FALSE, message=FALSE, results='hide'}
+aln_info <- lapply(aln_names,function(x){
+  read_csv(paste0('data/checking/aln_info/',x,'.csv')) %>%
+    # We arrange the new column aphabetically, which will set the order in which
+    # the populations will be compared later on for all pairwise distances.
+    # This order will be used with `group_split()` for calculations in the package
+    # PopGenome which will make it match the pairwise distances calculation from
+    # friction surfaces (see next sections).
+    arrange(pops)
+})
+```
+
+Because calculating our metric of pairwise genetic differentiation requires at least two sequences per locality, we will remove localities with a single sequence.
+
+```{r}
+aln_info <- lapply(aln_info, function(x) {
+  require(tidyverse)
+  # Getting name of locs with only one sequence
+  locs_remove <- x %>% group_by(pops) %>% summarize(n=n()) %>% filter(n==1) %>%
+    select(pops) %>% as.vector() %>% unlist()
+  # Checking if any and removing
+  if (length(locs_remove)!=0) {
+    x <- x %>% filter(!(pops %in% locs_remove))
+  }
+  return(x)
+})
+```
+
+From `aln_info`, we create a new object called `aln_loc`, which summarizes the unique localities of each OTU/LOCUS combination and their respective sample size.
+
+```{r}
+aln_loc <- lapply(aln_info,function(x){
+  x %>% group_by(pops) %>% 
+    summarize(pops = unique(pops),
+              otu = unique(otu),
+              locus = unique(locus),
+              longitude = mean(longitude),
+              latitude = mean(latitude),
+              n = n())
+})
+
+names(aln_info) <- names(aln_loc) <- aln_names
+```
+
+Let's use `aln_loc` to make final maps of localities per species:
+
+```{r}
+lapply(aln_loc,function(x) {
   theme_set(theme_bw()) #Setting theme
   ggplot(data = world) +
     geom_sf(fill= "ghostwhite", size = 0.1)+
@@ -786,9 +860,8 @@ for (n in spp) {
                            style = north_arrow_fancy_orienteering)+
     geom_sf(data = af_shapefile)+
     geom_sf(data = af_rivers, size = 0.8, color = 'blue')+
-    geom_point(data = filtered, aes(x = longitude,
-                                             y = latitude), size = 1, color = 'black')+
-  
+    geom_point(data = x, aes(x = longitude,
+                             y = latitude), size = 1, color = 'black')+
     coord_sf(xlim = c(study_area[1],study_area[2]),
              ylim = c(study_area[3],study_area[4]), expand = FALSE)+
     scale_x_discrete(name = "Longitude")+
@@ -796,248 +869,9 @@ for (n in spp) {
     theme(panel.grid.major = element_line(color = gray(.9), linetype = "dashed", size = 0),
          panel.background = element_rect(fill = "aliceblue"))
 
-  ggsave(paste0('data/response_variable/figures/maps_per_spp/',n,'.tiff'),
+  ggsave(paste0('data/response_variable/figures/maps_per_spp/',unique(x$otu),'.png'),
          width = 7, height = 9)
-}
+})
 ```
 
-Also, `leaflet` maps after the correction.
-
-```{r warning=FALSE, message=FALSE, results='hide'}
-dir.create('data/response_variable/leaflet_maps_aft_corrections/')
-spp <- sort(unique(afmtdna$otu))
-
-for (n in spp) {
-  filtered <- afmtdna %>% filter(otu == n) %>% 
-    dplyr::select(id,locality,province,country,full_loc,
-                  longitude,latitude,org_long,org_lat) %>% 
-    group_by(full_loc) %>% 
-    summarize(ids = paste0(id, collapse = ', '), locality = locality,
-              province = province, country = country, full_loc = full_loc,
-              longitude = longitude, latitude = latitude,
-              org_long = org_long, org_lat) %>% 
-    distinct(full_loc,.keep_all = TRUE)
-  popup_label <- paste(
-    "Locality: ", filtered$locality, "<br>",
-    "Province: ", filtered$province, "<br>",
-    "Country: ", filtered$country, "<br>",
-    "Full loc: ", filtered$full_loc, "<br>",
-    "Longitude: ", filtered$longitude, "<br>",
-    "Latitude: ", filtered$latitude, "<br>",
-    "Org. longitude: ", filtered$org_long, "<br>",
-    "Org. latitude: ", filtered$org_lat, "<br>",
-    "IDs: ", filtered$ids)
-  map <- leaflet() %>%
-    addProviderTiles('Esri.WorldStreetMap') %>%
-    addCircles(data = filtered,
-              popup = popup_label,
-              weight = 25)
-  saveWidget(map,file = paste0('data/response_variable/leaflet_maps_aft_corrections/',
-                               n,'.html'), title = n)
-}
-```
-
-Saving image:
-
-```{r}
-save.image('predGenDiff.RData')
-```
-
-### 2.5 Stats and visualization of raw data info
-
-Let's get some stats on our dataset and create some plots for visualization.
-
-#### 2.5.1 Status of loci in all OTUs
-
-1.  Number of loci per OTU:
-
-```{r}
-spp <- sort(unique(afmtdna$otu))
-loci <- vector('list',length = length(spp))
-n_loci <- c()
-for (i in 1:length(spp)) {
-  loci[[i]] <- afmtdna %>% filter(otu == spp[i]) %>% distinct(locus) %>% 
-    unlist()
-  n_loci <- c(n_loci,length(loci[[i]]))
-}
-```
-
-2.  Frequency of each locus in the dataset
-
-```{r}
-locus_frequency <- data.frame(locus = c('Control Region',
-                                        'Cyt B',
-                                        'ND2',
-                                        'ND3'),
-                              table(unlist(loci)))
-```
-
-3.  What locus are represented in each OTU? This will help us visualize if we need or can remove any OTU or locus.
-
-```{r}
-cr <- rep(0,length(spp))
-cytb <- rep(0,length(spp))
-nd2 <- rep(0,length(spp))
-nd3 <- rep(0,length(spp))
-
-for (i in 1:length(spp)) {
-  if (length(grep('cr',loci[[i]])!=0)) {
-    cr[i] <- 1
-  }
-  if (length(grep('cytb',loci[[i]])!=0)) {
-    cytb[i] <- 1
-  }
-  if (length(grep('nd2',loci[[i]])!=0)) {
-    nd2[i] <- 1
-  }
-  if (length(grep('nd3',loci[[i]])!=0)) {
-    nd3[i] <- 1
-  }
-}
-
-locus_spp_matrix <- data.frame(spp,cr,cytb,nd2,nd3) %>%
-  pivot_longer(!spp,names_to = "locus", values_to = "presence") %>%
-  arrange(spp) %>%
-  mutate_at(c('presence'), as.character)
-
-ggplot(locus_spp_matrix, aes(x = locus, y = spp)) + 
-  geom_raster(aes(fill=presence))
-ggsave('data/response_variable/figures/locus_spp_matrix_bf_nd3_removal.tiff', width = 7, height = 9)
-```
-
-We can see that, in most cases, for each OTUs we have only locus. CytB and ND2 were the most popular choices, and studies have mostly sequenced either one of them. Few studies have sequenced both (*Synallaxis*, *Sclerurus*, *Rhopias* and *Xiphorhynchus*). CR is also unique in most cases: few OTUs have it, but in those OTUs CR is the only locus representing their mitochondrial history. ND3 is the only redudant locus: everytime an OTU was sequenced for ND3, it was also sequenced for at least one other mtDNA locus. We will choose to keep CR, CytB and ND2, in order to not lose info on any OTU. But we will remove ND3 datasets, since they are redundant.
-
-```{r}
-afmtdna <- afmtdna %>% filter(locus != 'nd3')
-```
-
-Our total N of sequences now is 1801.
-
-Let's also re-update our loci info based on this new `afmtdna` and re-plot the locus_spp matrix:
-
-```{r}
-spp <- sort(unique(afmtdna$otu))
-loci <- vector('list',length = length(spp))
-n_loci <- c()
-for (i in 1:length(spp)) {
-  loci[[i]] <- afmtdna %>% filter(otu == spp[i]) %>% distinct(locus) %>% 
-    unlist()
-  n_loci <- c(n_loci,length(loci[[i]]))
-}
-
-locus_frequency <- data.frame(locus = c('Control Region',
-                                        'Cyt B',
-                                        'ND2'),
-                              table(unlist(loci)))
-
-cr <- rep(0,length(spp))
-cytb <- rep(0,length(spp))
-nd2 <- rep(0,length(spp))
-
-for (i in 1:length(spp)) {
-  if (length(grep('cr',loci[[i]])!=0)) {
-    cr[i] <- 1
-  }
-  if (length(grep('cytb',loci[[i]])!=0)) {
-    cytb[i] <- 1
-  }
-  if (length(grep('nd2',loci[[i]])!=0)) {
-    nd2[i] <- 1
-  }
-}
-
-locus_spp_matrix <- data.frame(spp,cr,cytb,nd2) %>%
-  pivot_longer(!spp,names_to = "locus", values_to = "presence") %>%
-  arrange(spp) %>%
-  mutate_at(c('presence'), as.character)
-
-ggplot(locus_spp_matrix, aes(x = locus, y = spp)) + 
-  geom_raster(aes(fill=presence))
-ggsave('data/response_variable/figures/locus_spp_matrix_aft_nd3_removal.tiff', width = 7, height = 9)
-```
-
-#### 2.5.2 Number of sequences and localities per each OTU-locus combination
-
-Let's first create a list in which each element will be a combination of OTU and locus. This will basically be the structure for the genetic alignments of next section. We will also save the `fasta` column, so we can keep the genetic data, and we will add to it the localities grouping, so we can calculate pairwise distances in `PopGenome` later on.
-
-```{r}
-aln_info <- vector('list',length = sum(n_loci)) # Length is all loci represented
-k=1
-file <- c()
-
-for (i in 1:length(spp)) {
-  for (j in 1:length(loci[[i]])) {
-    aln_info[[k]] <- afmtdna %>% filter((otu == spp[i]) & (locus == loci[[i]][j])) %>% 
-      dplyr::select(id,accession,otu,locus,full_loc,longitude,latitude,fasta)
-    species <- gsub(' ','_',spp[i])
-    locus <- loci[[i]][[j]]
-    file <- c(file,paste0(i,'_',species,'_',locus))
-    k=k+1
-  }
-}
-```
-
-Now let's get the number of sequences per locus per OTU (i.e, per *alignment*).
-
-```{r}
-n_per_aln <- sapply(aln_info,nrow)
-```
-
-Next, let's get the number of localities for each alignment. For that, we will manually provide in a new column a grouping of specimens per populations. Doing this manually will allow us to check for those that are too close together, or that share a similar name but are written in slightly different way, and collapse them if we want.
-
-> A different option to do this group would be to automatically check for localities that are geographically too close together and collapse them into one. This would get rid of localities that have the same coordinates but differ in the `full_loc` column, as well as localities with same `full_loc` but slightly different coordinates. This would also have the effect of: 1) reducing the amount of data points with very low levels of genetic diversity at the end; 2) increase sample size per locality. Reducing points with low GD might help reduce the amount of noise: if we have too many low GD points just because we failed to remove coordinates that are clearly too close together, they might mask the noise of the few regions that are far apart. This is based on the assumption that, for birds, at a specific distance that we use to collapse nearby coordinates, we don't expect individuals to be different in those nearby coordinates. This assumption might not be true for frogs, for instance. For now, we will choose not to remove nearby coordinates.
-
-Saving files for manual check:
-
-```{r}
-dir.create('data/checking/aln_info/')
-for (i in 1:length(aln_info)) {
-  write_csv(aln_info[[i]],paste0('data/checking/aln_info/',file[i],'.csv'))
-}
-```
-
-> I grouped many localities that had only one sequence with nearby localities, to increase sample size.
-
-After manually adding populations, we will read the files back into `aln_info` and then create `aln_loc` with sample size info.
-
-```{r warning=FALSE, message=FALSE, results='hide'}
-aln_loc <- vector('list',length = length(aln_info))
-n_sequences_loc <- c()
-dir.create('data/response_variable/figures/n_seq_per_loc/')
-for (i in 1:length(aln_info)) {
-  aln_info[[i]] <- read_csv(paste0('data/checking/aln_info/',file[i],'.csv')) %>%
-    # Arranging alphabetically per pops, so I can use group_split() later for PopGenome
-    # and make the pairwise in genetics match the pairwise in friction surfaces
-    arrange(pops)
-  # Removing individual 32, from Paraguari, in Mionectes dataset, which we saw
-  # is a sequence from G3PDH erroneously added to our dataset.
-  if (i == 11) {
-    aln_info[[i]] <- aln_info[[i]] %>% dplyr::slice(-32)
-  }
-  aln_loc[[i]] <- aln_info[[i]] %>% group_by(pops) %>% 
-    summarize(pops = unique(pops),
-              otu = unique(otu),
-              locus = unique(locus),
-              longitude = mean(longitude),
-              latitude = mean(latitude),
-              n = n())
-  
-  plot <- data.frame(species = rep(file[i],nrow(aln_loc[[i]])),
-                     aln_loc[[i]])
-  ggplot(plot,aes(x=pops,y=n))+geom_bar(stat='identity')+
-    geom_hline(yintercept=1, linetype="dashed", color = "red")+
-    theme(axis.text.x = element_text(angle = 70, hjust = 1),
-          legend.position = 'none')+
-    ggtitle(bquote(paste(italic(.(unique(aln_loc[[i]]$otu))),sep='')))
-    ggsave(paste0('data/response_variable/figures/n_seq_per_loc/',file[i],'.tiff'),
-           width = 7, height = 9)
-}
-```
-
-Let's use `aln_loc` to make final maps of localities per species:
-
-```{r}
-for (i in 1:length(aln_loc)) {
-  
-}
-```
+The objects `aln_info` and `aln_loc` will be the base for the sequence alignments and calculation of pairwise differences in the next sections.
