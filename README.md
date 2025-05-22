@@ -19,7 +19,7 @@ The empirical data for this manuscript comes from published studies on birds of 
 
 ## Steps
 
-The links below consist of a step-by-step tutorial for the analyses implemented in this manuscript. Original Quarto Markdown files can be downloaded from the `qmd` folder. Commented R scripts can be downloaded from the `R` folder.
+The links below lead to steps for the analyses implemented in this manuscript.
 
 1.  [Loading and processing sequence data](./qmd/1_loading.qmd)
 2.  [Creating response variable](./qmd/2_response.qmd)
